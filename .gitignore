@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Logs and artifacts
+log/
+*.log
+
+# Data and checkpoints
+data/
+checkpoints/
+
+# Plots and reports
+loss_comparison.png
+loss_delta.png
