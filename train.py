@@ -83,7 +83,9 @@ modules = [embedding_layer, norm_1, mha, norm_2, ffn, final_norm, lm_head]
 for module in modules:
     module.to(device)
 
-tokens = load_tokenized_data()
+tokens_np = load_tokenized_data()
+tokens = torch.tensor(tokens_np, dtype=torch.long, device=device)
+
 log_line(f"Total tokens in dataset: {len(tokens):,}")
 split_idx = int(0.9 * len(tokens))
 tokens_train = tokens[:split_idx]
@@ -160,8 +162,6 @@ def estimate_loss(data):
     with torch.no_grad():
         for _ in range(eval_steps):
             xb, yb = get_batch(data, batch_size_encoder, context_length)
-            xb = xb.to(device)
-            yb = yb.to(device)
             logits = forward(xb)
             B, T, C = logits.shape
             loss = F.cross_entropy(logits.view(B * T, C), yb.view(B * T))
@@ -194,13 +194,14 @@ if start_step >= train_loop:
     )
     raise SystemExit(0)
 
-for step in range(start_step, train_loop):
 
+for step in range(start_step, train_loop):
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     step_start = time.time()
+
     optimizer.zero_grad()
     xb, yb = get_batch(tokens_train, batch_size_encoder, context_length)
-    xb = xb.to(device)
-    yb = yb.to(device)
     logits = forward(xb)
     B, T, C = logits.shape
 
@@ -213,6 +214,8 @@ for step in range(start_step, train_loop):
     optimizer.step()
     scheduler.step()
 
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     step_time = time.time() - step_start
     tokens_per_sec = (B * T) / max(step_time, 1e-8)
     log_line(

@@ -17,14 +17,11 @@ class MultiHeadAttention(nn.Module):
         self.out_linear = nn.Linear(d_model, d_model, bias=False)
 
     def forward(self, x_norm, batch_size, context_length):
-        q = self.wq(x_norm)
-        k = self.wk(x_norm)
-        v = self.wv(x_norm)
 
         # Linear projections
-        Q = self.wq(q).view(batch_size, context_length, self.num_heads, self.d_k).transpose(1, 2)
-        K = self.wk(k).view(batch_size, context_length, self.num_heads, self.d_k).transpose(1, 2)
-        V = self.wv(v).view(batch_size, context_length, self.num_heads, self.d_k).transpose(1, 2)
+        Q = self.wq(x_norm).view(batch_size, context_length, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.wk(x_norm).view(batch_size, context_length, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.wv(x_norm).view(batch_size, context_length, self.num_heads, self.d_k).transpose(1, 2)
 
         # Scaled dot-product attention
         attention_scores = (Q @ K.transpose(-1, -2)) / math.sqrt(self.d_k)

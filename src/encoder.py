@@ -18,14 +18,13 @@ def load_tokenized_data(path=TOKENIZED_DATA_PATH):
 
 
 def get_batch(data, batch_size, context_length):
-    ix = np.random.randint(0, len(data) - context_length - 1, batch_size)
+    ix = torch.randint(0, len(data) - context_length - 1, (batch_size,), device=data.device)
 
-    x_list = [data[i : i + context_length] for i in ix]
-    y_list = [data[i + 1 : i + context_length + 1] for i in ix]
+    grid = ix.unsqueeze(1) + torch.arange(context_length, device=data.device)
 
-    x = torch.tensor(np.stack(x_list), dtype=torch.long)
-    y = torch.tensor(np.stack(y_list), dtype=torch.long)
-
+    x = data[grid]
+    y = data[grid + 1]
+    
     return x, y
 
 
@@ -58,5 +57,3 @@ class Encoder:
 
         loaded_tokens = load_tokenized_data()
         print(f"Total tokens in dataset: {len(loaded_tokens):,}")
-
-        xb, yb = get_batch(loaded_tokens, batch_size_encoder, context_length)
