@@ -11,7 +11,8 @@ class Embedding(nn.Module):
 
   def forward(self, xb):
     token_emb = self.token_embedding(xb)
-    position_emb = self.position_embedding(self.position)
+    seq_length = xb.size(1)
+    position_emb = self.position_embedding(self.position[:seq_length])
 
     x = token_emb + position_emb
     return x

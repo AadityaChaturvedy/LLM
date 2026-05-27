@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from src.dataset import FineWebDataset
 from src.tokenizer_utils import Tokenizer
 from src.encoder import Encoder
-from src.embedding import Embedding
 from src.config import (
     eval_every, eval_steps, save_every, max_grad_norm,
     train_loop,
@@ -18,17 +17,16 @@ from src.config import (
     context_length, batch_size_encoder, 
     num_heads, d_model,
     hidden_dim_ffn,
-    TOKENIZED_DATA_PATH
+    TOKENIZED_DATA_PATH,
+    num_layers
 )
 from src.encoder import get_batch, load_tokenized_data
-from src.rmsNorm import RMSNorm
-from src.multiHeadAttention import MultiHeadAttention
-from src.feedForwardNetwork import FeedForwardNetwork
+from src.model import GPT
 
 os.makedirs("checkpoints", exist_ok=True)
-os.makedirs("logs", exist_ok=True)
+os.makedirs("log", exist_ok=True)
 run_id = time.strftime("%Y%m%d-%H%M%S")
-log_path = os.path.join("logs", f"train_{run_id}.log")
+log_path = os.path.join("log", f"train_{run_id}.log")
 
 def log_line(message):
     print(message)
@@ -41,19 +39,34 @@ torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(seed)
 
+# Check for GPU availability and set device
 if torch.cuda.is_available():
     device = torch.device("cuda")
 else:
     device = torch.device("cpu")
 log_line(f"Using device: {device}")
 
+# Determine mixed precision settings based on device capabilities
+if device.type == "cuda" and torch.cuda.is_bf16_supported():
+    amp_dtype = torch.bfloat16
+    use_scaler = False
+    log_line("Using bfloat16 mixed precision (no scaling required).")
+elif device.type == "cuda":
+    amp_dtype = torch.float16
+    use_scaler = True
+    log_line("Using float16 mixed precision with GradScaler.")
+else:
+    amp_dtype = torch.float32
+    use_scaler = False
+    log_line("Running on CPU; using standard float32 precision.")
+
+scaler = torch.amp.GradScaler("cuda") if use_scaler else None
+
 '''Tokenize the text'''
 tokenizer = Tokenizer()
 if not os.path.exists(TOKENIZED_DATA_PATH):
-
     '''Get Dataset'''
     dataset = FineWebDataset()
-
     tokenizer.train(dataset.dataset)
 else:
     log_line(f"Tokenized data found at {TOKENIZED_DATA_PATH}; skipping tokenizer training.")
@@ -65,23 +78,17 @@ if not os.path.exists(TOKENIZED_DATA_PATH):
 else:
     log_line(f"Tokenized data found at {TOKENIZED_DATA_PATH}; skipping encoding.")
 
-'''Embedding'''
-
-embedding_layer = Embedding(vocab_size, embedding_dim, context_length)
-norm_1 = RMSNorm(dim=embedding_dim)
-mha = MultiHeadAttention(num_heads, d_model)
-norm_2 = RMSNorm(dim=embedding_dim)
-ffn = FeedForwardNetwork(dim=d_model, hidden_dim=hidden_dim_ffn)
-final_norm = RMSNorm(dim=embedding_dim)
-lm_head = nn.Linear(embedding_dim, vocab_size, bias=False)
-
-nn.init.normal_(lm_head.weight, mean=0.0, std=0.02)
-nn.init.normal_(embedding_layer.token_embedding.weight, mean=0.0, std=0.02)
-lm_head.weight = embedding_layer.token_embedding.weight
-
-modules = [embedding_layer, norm_1, mha, norm_2, ffn, final_norm, lm_head]
-for module in modules:
-    module.to(device)
+# Instantiate GPT Model
+model = GPT(
+    vocab_size=vocab_size,
+    embedding_dim=embedding_dim,
+    context_length=context_length,
+    num_layers=num_layers,
+    num_heads=num_heads,
+    d_model=d_model,
+    hidden_dim_ffn=hidden_dim_ffn
+)
+model.to(device)
 
 tokens_np = load_tokenized_data()
 tokens = torch.tensor(tokens_np, dtype=torch.long, device=device)
@@ -92,14 +99,7 @@ tokens_train = tokens[:split_idx]
 tokens_val = tokens[split_idx:]
 log_line(f"Train tokens: {len(tokens_train):,} | Val tokens: {len(tokens_val):,}")
 
-all_parameters = (
-    list(embedding_layer.parameters()) +
-    list(norm_1.parameters()) +
-    list(mha.parameters()) +
-    list(norm_2.parameters()) +
-    list(ffn.parameters()) +
-    list(final_norm.parameters())
-)
+all_parameters = list(model.parameters())
 
 last_param_count = None
 param_count = sum(p.numel() for p in all_parameters)
@@ -138,50 +138,28 @@ def get_latest_checkpoint(checkpoint_dir):
 
     return latest_path
 
-def set_mode(is_train):
-    for module in modules:
-        module.train(is_train)
-
-def forward(xb):
-    x = embedding_layer(xb)
-    x_norm = norm_1(x)
-
-    attention_output = mha(x_norm, xb.size(0), context_length)
-    x = x + attention_output
-
-    x_norm = norm_2(x)
-    ffn_output = ffn(x_norm)
-    x = x + ffn_output
-
-    x_final = final_norm(x)
-    return lm_head(x_final)
-
 def estimate_loss(data):
-    set_mode(False)
+    model.eval()
     losses = []
     with torch.no_grad():
         for _ in range(eval_steps):
             xb, yb = get_batch(data, batch_size_encoder, context_length)
-            logits = forward(xb)
-            B, T, C = logits.shape
-            loss = F.cross_entropy(logits.view(B * T, C), yb.view(B * T))
+            # Autocast validation forward pass
+            with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
+                logits = model(xb)
+                B, T, C = logits.shape
+                loss = F.cross_entropy(logits.view(B * T, C), yb.view(B * T))
             losses.append(loss.item())
-    set_mode(True)
+    model.train()
     return sum(losses) / len(losses)
 
-set_mode(True)
+model.train()
 
 start_step = 0
 resume_path = get_latest_checkpoint("checkpoints")
 if resume_path:
     checkpoint = torch.load(resume_path, map_location=device)
-    embedding_layer.load_state_dict(checkpoint["embedding_layer"])
-    norm_1.load_state_dict(checkpoint["norm_1"])
-    mha.load_state_dict(checkpoint["mha"])
-    norm_2.load_state_dict(checkpoint["norm_2"])
-    ffn.load_state_dict(checkpoint["ffn"])
-    final_norm.load_state_dict(checkpoint["final_norm"])
-    lm_head.load_state_dict(checkpoint["lm_head"])
+    model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
     scheduler.load_state_dict(checkpoint["scheduler"])
     start_step = checkpoint.get("step", 0)
@@ -194,28 +172,37 @@ if start_step >= train_loop:
     )
     raise SystemExit(0)
 
-
 for step in range(start_step, train_loop):
-    if device.type == "cuda":
-        torch.cuda.synchronize()
+    torch.cuda.synchronize()
     step_start = time.time()
-
     optimizer.zero_grad()
     xb, yb = get_batch(tokens_train, batch_size_encoder, context_length)
-    logits = forward(xb)
-    B, T, C = logits.shape
 
-    logits_flat = logits.view(B * T, C)
-    targets_flat = yb.view(B * T)
+    # 1. Forward pass under autocast
+    with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
+        logits = model(xb)
+        B, T, C = logits.shape
+        logits_flat = logits.view(B * T, C)
+        targets_flat = yb.view(B * T)
+        loss = F.cross_entropy(logits_flat, targets_flat)
 
-    loss = F.cross_entropy(logits_flat, targets_flat)
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(all_parameters, max_grad_norm)
-    optimizer.step()
+    # 2. Backward & Optimization step
+    if scaler is not None:
+        # float16 requires scaling to prevent underflow
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer) # Unscale gradients before clipping
+        torch.nn.utils.clip_grad_norm_(all_parameters, max_grad_norm)
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        # bfloat16/float32 doesn't need scaling
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(all_parameters, max_grad_norm)
+        optimizer.step()
+
     scheduler.step()
 
-    if device.type == "cuda":
-        torch.cuda.synchronize()
+    torch.cuda.synchronize()
     step_time = time.time() - step_start
     tokens_per_sec = (B * T) / max(step_time, 1e-8)
     log_line(
@@ -232,12 +219,6 @@ for step in range(start_step, train_loop):
             "step": step + 1,
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
-            "embedding_layer": embedding_layer.state_dict(),
-            "norm_1": norm_1.state_dict(),
-            "mha": mha.state_dict(),
-            "norm_2": norm_2.state_dict(),
-            "ffn": ffn.state_dict(),
-            "final_norm": final_norm.state_dict(),
-            "lm_head": lm_head.state_dict(),
+            "model": model.state_dict(),
         }
         torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
