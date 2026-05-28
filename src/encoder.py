@@ -18,13 +18,10 @@ def load_tokenized_data(path=TOKENIZED_DATA_PATH):
 
 
 def get_batch(data, batch_size, context_length):
-    ix = torch.randint(0, len(data) - context_length - 1, (batch_size,), device=data.device)
-
-    grid = ix.unsqueeze(1) + torch.arange(context_length, device=data.device)
-
-    x = data[grid]
-    y = data[grid + 1]
-    
+    # High-performance CPU/GPU batching using contiguous slices to avoid slow advanced indexing
+    ix = torch.randint(0, len(data) - context_length - 1, (batch_size,))
+    x = torch.stack([data[i : i + context_length] for i in ix])
+    y = torch.stack([data[i + 1 : i + context_length + 1] for i in ix])
     return x, y
 
 

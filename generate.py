@@ -12,7 +12,7 @@ from src.config import (
 from src.model import GPT
 
 @torch.no_grad()
-def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, device):
+def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, top_p, repetition_penalty, device):
     model.eval()
     
     # Encode prompt
@@ -29,12 +29,37 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, devic
         logits = model(x_cond) 
         logits = logits[:, -1, :] 
         
+        # Apply repetition penalty
+        if repetition_penalty != 1.0:
+            for token_id in set(x[0].tolist()):
+                if logits[0, token_id] < 0:
+                    logits[0, token_id] *= repetition_penalty
+                else:
+                    logits[0, token_id] /= repetition_penalty
+        
         if temperature > 0.0:
             logits = logits / temperature
             
-            if top_k is not None:
+            # 1. Top-k filtering
+            if top_k is not None and top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
+                
+            # 2. Top-p (Nucleus) filtering
+            if top_p is not None and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Identify which tokens exceed top_p cumulative threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift indices right to ensure we keep the first token exceeding the threshold
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = False
+                
+                # Map mask back to original logits shape
+                indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
+                indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = -float('Inf')
                 
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
@@ -85,6 +110,10 @@ def main():
     model.to(device)
     print("Model loaded successfully!")
     
+    # Default search parameters (nucleus sampling & repetition penalty)
+    top_p = 0.9
+    repetition_penalty = 1.15
+    
     # 4. Interactive Generation Loop
     while True:
         try:
@@ -98,6 +127,8 @@ def main():
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
                 device=device
             )
         except KeyboardInterrupt:
