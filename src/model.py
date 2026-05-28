@@ -47,8 +47,15 @@ class GPT(nn.Module):
     def forward(self, xb):
         batch_size, seq_len = xb.shape
         x = self.embedding(xb)
+        
         for block in self.blocks:
-            x = block(x, batch_size, seq_len)
+            if self.training:
+                # Activation checkpointing to reduce VRAM usage
+                from torch.utils.checkpoint import checkpoint
+                x = checkpoint(block, x, batch_size, seq_len, use_reentrant=False)
+            else:
+                x = block(x, batch_size, seq_len)
+                
         x = self.final_norm(x)
         logits = self.lm_head(x)
         return logits

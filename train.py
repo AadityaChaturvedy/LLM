@@ -153,7 +153,9 @@ if param_count != last_param_count:
     log_line(f"Total parameters (tied lm_head): {param_count:,}")
     last_param_count = param_count
 
-optimizer = optim.AdamW(all_parameters, lr=3e-4)
+# Use fused AdamW on CUDA device to speed up updates and reduce VRAM overhead
+use_fused = (device.type == "cuda")
+optimizer = optim.AdamW(all_parameters, lr=3e-4, fused=use_fused)
 warmup_steps = min(2000, max(100, train_loop // 100))
 
 def lr_lambda(current_step):
@@ -225,79 +227,91 @@ if is_ddp:
 tokens_per_step = effective_batch_size * context_length
 steps_per_epoch = len(tokens_train) / tokens_per_step
 
-for step in range(start_step, train_loop):
-    torch.cuda.synchronize()
-    step_start = time.time()
-    optimizer.zero_grad()
+try:
+    for step in range(start_step, train_loop):
+        torch.cuda.synchronize()
+        step_start = time.time()
+        optimizer.zero_grad()
 
-    accumulated_loss = 0.0
-    for _ in range(accumulation_steps):
-        xb, yb = get_batch(tokens_train, batch_size_encoder, context_length)
-        xb, yb = xb.to(device), yb.to(device)
+        accumulated_loss = 0.0
+        for _ in range(accumulation_steps):
+            xb, yb = get_batch(tokens_train, batch_size_encoder, context_length)
+            xb, yb = xb.to(device), yb.to(device)
 
-        # 1. Forward pass under autocast
-        with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
-            logits = model(xb)
-            B, T, C = logits.shape
-            logits_flat = logits.view(B * T, C)
-            targets_flat = yb.view(B * T)
-            # Scale the loss by accumulation steps
-            loss = F.cross_entropy(logits_flat, targets_flat) / accumulation_steps
+            # 1. Forward pass under autocast
+            with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
+                logits = model(xb)
+                B, T, C = logits.shape
+                logits_flat = logits.view(B * T, C)
+                targets_flat = yb.view(B * T)
+                # Scale the loss by accumulation steps
+                loss = F.cross_entropy(logits_flat, targets_flat) / accumulation_steps
 
-        # 2. Backward step
+            # 2. Backward step
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+            
+            accumulated_loss += loss.item()
+
+        # 3. Optimization step (after accumulating gradients)
         if scaler is not None:
-            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer) # Unscale gradients before clipping
+            torch.nn.utils.clip_grad_norm_(all_parameters, max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
         else:
-            loss.backward()
+            torch.nn.utils.clip_grad_norm_(all_parameters, max_grad_norm)
+            optimizer.step()
+
+        scheduler.step()
+
+        torch.cuda.synchronize()
+        step_time = time.time() - step_start
+        tokens_per_sec = (batch_size_encoder * accumulation_steps * context_length) / max(step_time, 1e-8)
+
+        epoch_val = (step + 1) / steps_per_epoch
+        epoch_num = int(step / steps_per_epoch) + 1
+        percent = (step % steps_per_epoch) / steps_per_epoch
         
-        accumulated_loss += loss.item()
+        bar_length = 20
+        filled_length = int(round(bar_length * percent))
+        bar = '█' * filled_length + '░' * (bar_length - filled_length)
 
-    # 3. Optimization step (after accumulating gradients)
-    if scaler is not None:
-        scaler.unscale_(optimizer) # Unscale gradients before clipping
-        torch.nn.utils.clip_grad_norm_(all_parameters, max_grad_norm)
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        torch.nn.utils.clip_grad_norm_(all_parameters, max_grad_norm)
-        optimizer.step()
-
-    scheduler.step()
-
-    torch.cuda.synchronize()
-    step_time = time.time() - step_start
-    tokens_per_sec = (batch_size_encoder * accumulation_steps * context_length) / max(step_time, 1e-8)
-
-    epoch_val = (step + 1) / steps_per_epoch
-    epoch_num = int(step / steps_per_epoch) + 1
-    percent = (step % steps_per_epoch) / steps_per_epoch
-    
-    bar_length = 20
-    filled_length = int(round(bar_length * percent))
-    bar = '█' * filled_length + '░' * (bar_length - filled_length)
-
-    if not is_ddp or local_rank == 0:
-        print(
-            f"\rEpoch {epoch_num} [{bar}] {percent*100:.1f}% | Loss : {accumulated_loss:.4f} | Tokens/sec: {tokens_per_sec:,.0f}", 
-            end="", 
-            flush=True
-        )
-
-        with open(log_path, "a", encoding="utf-8") as log_file:
-            log_file.write(
-                f"Step {step + 1} | Epoch {epoch_val:.2f} | Loss: {accumulated_loss:.4f} | Tokens/sec: {tokens_per_sec:,.0f}\n"
+        if not is_ddp or local_rank == 0:
+            print(
+                f"\rEpoch {epoch_num} [{bar}] {percent*100:.1f}% | Loss : {accumulated_loss:.4f} | Tokens/sec: {tokens_per_sec:,.0f}", 
+                end="", 
+                flush=True
             )
 
-    if (step + 1) % eval_every == 0:
-        val_loss = estimate_loss(tokens_val)
-        log_line(f"\nEval @ step {step + 1} | Val loss: {val_loss:.4f}")
+            with open(log_path, "a", encoding="utf-8") as log_file:
+                log_file.write(
+                    f"Step {step + 1} | Epoch {epoch_val:.2f} | Loss: {accumulated_loss:.4f} | Tokens/sec: {tokens_per_sec:,.0f}\n"
+                )
 
-    if (step + 1) % save_every == 0:
-        if not is_ddp or local_rank == 0:
-            checkpoint = {
-                "step": step + 1,
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "model": model.state_dict(),
-            }
-            torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
+        if (step + 1) % eval_every == 0:
+            val_loss = estimate_loss(tokens_val)
+            log_line(f"\nEval @ step {step + 1} | Val loss: {val_loss:.4f}")
+
+        if (step + 1) % save_every == 0:
+            if not is_ddp or local_rank == 0:
+                checkpoint = {
+                    "step": step + 1,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "model": model.state_dict(),
+                }
+                torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
+except KeyboardInterrupt:
+    if not is_ddp or local_rank == 0:
+        log_line(f"\nTraining interrupted by user. Saving emergency checkpoint at step {step + 1}...")
+        checkpoint = {
+            "step": step + 1,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "model": model.state_dict(),
+        }
+        torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
+    raise SystemExit(0)

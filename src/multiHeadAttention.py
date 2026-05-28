@@ -23,13 +23,11 @@ class MultiHeadAttention(nn.Module):
         K = self.wk(x_norm).view(batch_size, context_length, self.num_heads, self.d_k).transpose(1, 2)
         V = self.wv(x_norm).view(batch_size, context_length, self.num_heads, self.d_k).transpose(1, 2)
 
-        # Scaled dot-product attention
-        attention_scores = (Q @ K.transpose(-1, -2)) / math.sqrt(self.d_k)
-        mask = torch.tril(torch.ones(context_length, context_length, device=attention_scores.device))
-        masked_scores = attention_scores.masked_fill(mask == 0, float("-inf"))
-
-        attn_weights = torch.softmax(masked_scores, dim=-1)
-        attn_output = attn_weights @ V
+        # Efficient scaled dot-product attention (utilizes FlashAttention-2 / Memory-Efficient attention)
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            Q, K, V,
+            is_causal=True
+        )
 
         # Concatenate heads and pass through final linear layer
         attn_output = attn_output.transpose(1, 2).contiguous().view(
