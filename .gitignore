@@ -25,5 +25,5 @@ data/
 checkpoints/
 
 # Plots and reports
-loss_comparison.png
+loss.png
 loss_delta.png

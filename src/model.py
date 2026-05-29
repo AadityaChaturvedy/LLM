@@ -6,6 +6,8 @@ from src.rmsNorm import RMSNorm
 from src.multiHeadAttention import MultiHeadAttention
 from src.feedForwardNetwork import FeedForwardNetwork
 
+from torch.utils.checkpoint import checkpoint
+
 class Block(nn.Module):
     def __init__(self, num_heads, d_model, hidden_dim_ffn):
         super().__init__()
@@ -51,7 +53,6 @@ class GPT(nn.Module):
         for block in self.blocks:
             if self.training:
                 # Activation checkpointing to reduce VRAM usage
-                from torch.utils.checkpoint import checkpoint
                 x = checkpoint(block, x, batch_size, seq_len, use_reentrant=False)
             else:
                 x = block(x, batch_size, seq_len)
