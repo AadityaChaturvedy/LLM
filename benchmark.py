@@ -65,7 +65,7 @@ print(f"  vocab={len(tok.vocab):,}  merges={len(tok.merges):,}\n")
 # ── 5. Load XL-Sum Hindi from local directory ────────────────────────────────
 import os
 
-local_data_path = "/Users/aadityachaturvedy/Developer/IIT_Roorkee_Internship/hindi_XLSum_v2.0"
+local_data_path = "/home/aaditya/LLM/hindi_XLSum_v2.0"
 
 # If the folder contains a .jsonl or .json file
 print(f"Loading local dataset from: {local_data_path} …")

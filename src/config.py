@@ -33,8 +33,8 @@ if LANGUAGE == "hindi":
     num_heads = 16
     d_model = 1024
     hidden_dim_ffn = 4096
-    batch_size_encoder = 32
-    accumulation_steps = 4
+    batch_size_encoder = 4
+    accumulation_steps = 16
     context_length = 512
 elif LANGUAGE == "hinglish":
     hindi_vocab_size = 100_000
