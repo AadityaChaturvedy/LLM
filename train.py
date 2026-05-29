@@ -76,7 +76,11 @@ def main():
         '''Tokenize the text'''
         if LANGUAGE == "hindi":
             tokenizer = CustomTokenizer()
-            tokenizer.train(max_docs_hindi=TOTAL_ROWS, max_docs_english=TOTAL_ROWS)
+            tokenizer.train("hindi", max_docs_hindi=TOTAL_ROWS)
+            dataset = BilingualHindiDataset()
+        elif LANGUAGE == "hinglish":
+            tokenizer = CustomTokenizer()
+            tokenizer.train("hinglish", max_docs_hindi=TOTAL_ROWS, max_docs_english=TOTAL_ROWS)
             dataset = BilingualHindiDataset()
         else:
             tokenizer = Tokenizer()
@@ -85,6 +89,8 @@ def main():
     
     if not os.path.exists(TOKENIZED_DATA_PATH):
         if LANGUAGE == "hindi":
+            dataset = BilingualHindiDataset()
+        elif LANGUAGE == "hinglish":
             dataset = BilingualHindiDataset()
         else:
             dataset = FineWebDataset()

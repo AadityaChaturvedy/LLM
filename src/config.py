@@ -15,16 +15,30 @@ save_every = 10000
 max_grad_norm = 1.0
 
 # Tokenizer & Dataset Rows
-TOTAL_ROWS = 200_000
+TOTAL_ROWS = 500_000
 batch_size_tokenizer = 1000
 
-# Language Mode: 'english' or 'hindi'
+# Language Mode: 'english' or 'hindi' or 'hinglish'
 LANGUAGE = "hindi"
+
+hindi_vocab_size = 0
+english_vocab_size = 0
 
 # Model Dimensions (based on LANGUAGE mode)
 if LANGUAGE == "hindi":
-    hindi_vocab_size = 100000
-    english_vocab_size = 28000
+    hindi_vocab_size = 128_000
+    vocab_size = hindi_vocab_size
+    embedding_dim = 1024
+    num_layers = 24
+    num_heads = 16
+    d_model = 1024
+    hidden_dim_ffn = 4096
+    batch_size_encoder = 32
+    accumulation_steps = 4
+    context_length = 512
+elif LANGUAGE == "hinglish":
+    hindi_vocab_size = 100_000
+    english_vocab_size = 28_000
     vocab_size = hindi_vocab_size + english_vocab_size 
     embedding_dim = 1024
     num_layers = 24
@@ -35,7 +49,7 @@ if LANGUAGE == "hindi":
     accumulation_steps = 4
     context_length = 512
 else:
-    vocab_size = 52000
+    vocab_size = 52_000
     embedding_dim = 768
     num_layers = 12
     num_heads = 12

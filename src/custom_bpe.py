@@ -37,15 +37,6 @@ def pre_tokenize(text: str) -> list:
             first = False
     return tokens
 
-
-# ---------------------------------------------------------------------------
-# Fast BPE trainer using an inverted index
-#
-# Key idea: instead of scanning ALL vocab_dict words every merge, we keep
-#   pair_to_words[pair] = set of word-ids that contain that pair
-# so each merge only touches O(affected_words) instead of O(all_words).
-# ---------------------------------------------------------------------------
-
 class CustomIndicBPE:
     SPECIAL_TOKENS = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"]
 
@@ -53,7 +44,7 @@ class CustomIndicBPE:
         self.vocab        : list             = []
         self.token_to_id  : dict             = {}
         self.id_to_token  : dict             = {}
-        self.merges       : list             = []   # [(p1,p2), merged]
+        self.merges       : list             = [] 
         self._cache       : dict             = {}
 
     # ------------------------------------------------------------------ train
