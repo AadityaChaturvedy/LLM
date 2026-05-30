@@ -26,7 +26,7 @@ english_vocab_size = 0
 
 # Model Dimensions (based on LANGUAGE mode)
 if LANGUAGE == "hindi":
-    hindi_vocab_size = 128_000
+    hindi_vocab_size = 64_000
     vocab_size = hindi_vocab_size
     embedding_dim = 1024
     num_layers = 24
