@@ -17,7 +17,7 @@ class FineWebDataset:
             print(f"Text Snippet: {row['text'][:250]}...\n")
 
 class BilingualHindiDataset:
-    def __init__(self, hindi_ratio=0.7, split="train", streaming=True):
+    def __init__(self, hindi_ratio, split="train", streaming=True):
         print("Connecting to Sangraha (Hindi Verified) and FineWeb (English)...")
         # Load verified Hindi Devanagari subset from Sangraha
         self.hindi_dataset = load_dataset(

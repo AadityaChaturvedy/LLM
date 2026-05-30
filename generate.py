@@ -3,11 +3,13 @@ import torch
 import torch.nn.functional as F
 from tokenizers import ByteLevelBPETokenizer
 
+from src.custom_tokenizer import CustomTokenizer
 from src.config import (
     max_new_tokens, temperature, top_k,
     vocab_size, embedding_dim, context_length,
     num_layers, num_heads, d_model, hidden_dim_ffn,
-    TOKENIZER_VOCAB_PATH, TOKENIZER_MERGES_PATH
+    TOKENIZER_VOCAB_PATH, TOKENIZER_MERGES_PATH,
+    LANGUAGE
 )
 from src.model import GPT
 
@@ -16,11 +18,24 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, top_p
     model.eval()
     
     # Encode prompt
-    encoded = tokenizer.encode(prompt)
-    x = torch.tensor([encoded.ids], dtype=torch.long, device=device) 
+    if hasattr(tokenizer, 'encode'):
+        encoded = tokenizer.encode(prompt)
+        # CustomTokenizer.encode returns an object with .ids
+        if hasattr(encoded, 'ids'):
+            ids = encoded.ids
+        else:
+            ids = encoded
+    else:
+        # Fallback for ByteLevelBPETokenizer if needed
+        encoded = tokenizer.encode(prompt)
+        ids = encoded.ids
+    
+    x = torch.tensor([ids], dtype=torch.long, device=device) 
     
     print(f"\n--- Prompt: {prompt} ---")
     print(prompt, end="", flush=True)
+    
+    last_text = tokenizer.decode(x[0].tolist())
     
     for _ in range(max_new_tokens):
 
@@ -66,10 +81,13 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, top_p
         else:
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
             
+            
         x = torch.cat((x, next_token), dim=1)
         
-        new_token_str = tokenizer.decode([next_token.item()])
-        print(new_token_str, end="", flush=True)
+        full_text = tokenizer.decode(x[0].tolist())
+        new_text = full_text[len(last_text):]
+        print(new_text, end="", flush=True)
+        last_text = full_text
         
     print("\n--- End of Generation ---\n")
 
@@ -79,8 +97,15 @@ def main():
     
     # 1. Load Tokenizer
     if not os.path.exists(TOKENIZER_VOCAB_PATH):
-        raise FileNotFoundError("Tokenizer files not found in data/ directory!")
-    tokenizer = ByteLevelBPETokenizer(TOKENIZER_VOCAB_PATH, TOKENIZER_MERGES_PATH)
+        raise FileNotFoundError(f"Tokenizer files not found in {TOKENIZER_VOCAB_PATH}!")
+    
+    if LANGUAGE in ["hindi", "hinglish"]:
+        tokenizer = CustomTokenizer()
+        tokenizer.load()
+        print(f"Loaded CustomTokenizer for {LANGUAGE}")
+    else:
+        tokenizer = ByteLevelBPETokenizer(TOKENIZER_VOCAB_PATH, TOKENIZER_MERGES_PATH)
+        print("Loaded ByteLevelBPETokenizer")
     
     # 2. Instantiate Model
     model = GPT(
@@ -106,7 +131,17 @@ def main():
         
     print(f"Loading weights from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model"])
+    
+    # Strip "_orig_mod." prefix from state_dict keys if they were saved from a compiled model
+    state_dict = checkpoint["model"]
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("_orig_mod."):
+            new_state_dict[k[len("_orig_mod.") :]] = v
+        else:
+            new_state_dict[k] = v
+            
+    model.load_state_dict(new_state_dict)
     model.to(device)
     print("Model loaded successfully!")
     
