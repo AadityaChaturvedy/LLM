@@ -28,11 +28,11 @@ english_vocab_size = 0
 if LANGUAGE == "hindi":
     hindi_vocab_size = 64_000
     vocab_size = hindi_vocab_size
-    embedding_dim = 1536
+    embedding_dim = 1792
     num_layers = 24
     num_heads = 16
-    d_model = 1536
-    hidden_dim_ffn = 4096
+    d_model = 1792
+    hidden_dim_ffn = 4864
     batch_size_encoder = 2
     accumulation_steps = 32
     context_length = 512

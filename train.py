@@ -1,4 +1,5 @@
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import sys
 import multiprocessing as mp
 
@@ -130,7 +131,10 @@ def main():
         d_model=d_model,
         hidden_dim_ffn=hidden_dim_ffn
     )
-    model.to(device)
+    if "cuda" in str(device) and amp_dtype == torch.bfloat16:
+        model.to(device, dtype=torch.bfloat16)
+    else:
+        model.to(device)
 
     # Checkpoint loading (done before DDP wrapping or compiling)
     start_step = 0
@@ -175,7 +179,7 @@ def main():
     # Wrap model with DDP
     if ddp:
         from torch.nn.parallel import DistributedDataParallel as DDP
-        model = DDP(model, device_ids=[ddp_local_rank])
+        model = DDP(model, device_ids=[ddp_local_rank], gradient_as_bucket_view=True)
 
     # Compile model for faster training
     if "cuda" in str(device):
@@ -229,7 +233,7 @@ def main():
                 with torch.amp.autocast(device_type="cuda" if "cuda" in str(device) else "cpu", dtype=amp_dtype):
                     logits = model(xb)
                     B, T, C = logits.shape
-                    loss = F.cross_entropy(logits.view(B * T, C), yb.view(B * T))
+                    loss = F.cross_entropy(logits.view(B * T, C).float(), yb.view(B * T))
                 losses.append(loss.item())
         model.train()
         return sum(losses) / len(losses)
@@ -268,7 +272,7 @@ def main():
                         B, T, C = logits.shape
                         logits_flat = logits.view(B * T, C)
                         targets_flat = yb.view(B * T)
-                        loss = F.cross_entropy(logits_flat, targets_flat) / accumulation_steps
+                        loss = F.cross_entropy(logits_flat.float(), targets_flat) / accumulation_steps
 
                     if scaler is not None:
                         scaler.scale(loss).backward()
