@@ -172,45 +172,38 @@ def main():
             dist.destroy_process_group()
         raise SystemExit(0)
 
-    # Wrap model with FSDP / compile
+    # Wrap model with DDP
     if ddp:
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-        from torch.distributed.fsdp import StateDictType, FullStateDictConfig
-        from src.model import Block
-        import functools
-        
-        gpt_auto_wrap_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls={Block},
-        )
-        model = FSDP(
-            model,
-            auto_wrap_policy=gpt_auto_wrap_policy,
-            device_id=torch.cuda.current_device()
-        )
-        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        FSDP.set_state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy)
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[ddp_local_rank])
 
+    # Compile model for faster training
     if "cuda" in str(device):
+        log_line("Compiling the model with torch.compile...")
         model = torch.compile(model)
 
     tokens_np = load_tokenized_data()
-    tokens = torch.tensor(tokens_np, dtype=torch.long, device=device)
+    tokens = torch.tensor(tokens_np, dtype=torch.long, device="cpu")
 
     log_line(f"Total tokens in dataset: {len(tokens):,}")
     split_idx = int(0.9 * len(tokens))
     tokens_train = tokens[:split_idx]
     tokens_val = tokens[split_idx:]
+    if "cuda" in str(device):
+        tokens_train = tokens_train.pin_memory()
+        tokens_val = tokens_val.pin_memory()
     log_line(f"Train tokens: {len(tokens_train):,} | Val tokens: {len(tokens_val):,}")
 
     all_parameters = list(model.parameters())
     param_count = sum(p.numel() for p in all_parameters)
     log_line(f"Total parameters (tied lm_head): {param_count:,}")
 
-    # Use fused AdamW on CUDA device to speed up updates and reduce VRAM overhead
-    use_fused = ("cuda" in str(device))
-    optimizer = optim.AdamW(all_parameters, lr=3e-4, fused=use_fused)
+    # Use 8-bit AdamW on CUDA device to reduce VRAM overhead and run purely on GPU
+    if "cuda" in str(device):
+        import bitsandbytes as bnb
+        optimizer = bnb.optim.AdamW8bit(all_parameters, lr=3e-4)
+    else:
+        optimizer = optim.AdamW(all_parameters, lr=3e-4)
     
     if resume_path:
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -232,7 +225,7 @@ def main():
         with torch.no_grad():
             for _ in range(eval_steps):
                 xb, yb = get_batch(data, batch_size_encoder, context_length)
-                xb, yb = xb.to(device), yb.to(device)
+                xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
                 with torch.amp.autocast(device_type="cuda" if "cuda" in str(device) else "cpu", dtype=amp_dtype):
                     logits = model(xb)
                     B, T, C = logits.shape
@@ -268,7 +261,7 @@ def main():
 
                 with ctx:
                     xb, yb = get_batch(tokens_train, batch_size_encoder, context_length)
-                    xb, yb = xb.to(device), yb.to(device)
+                    xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
 
                     with torch.amp.autocast(device_type="cuda" if "cuda" in str(device) else "cpu", dtype=amp_dtype):
                         logits = model(xb)
@@ -336,22 +329,28 @@ def main():
                 log_line(f"\nEval @ step {step + 1} | Val loss: {val_loss:.4f}")
 
             if is_master_process and (step + 1) % save_every == 0:
+                raw_model = model.module if hasattr(model, "module") else model
+                if hasattr(raw_model, "_orig_mod"):
+                    raw_model = raw_model._orig_mod
                 checkpoint = {
                     "step": step + 1,
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
-                    "model": model.state_dict(),
+                    "model": raw_model.state_dict(),
                 }
                 torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
                 
     except KeyboardInterrupt:
         if is_master_process:
             log_line(f"\nTraining interrupted by user. Saving emergency checkpoint at step {step + 1}...")
+            raw_model = model.module if hasattr(model, "module") else model
+            if hasattr(raw_model, "_orig_mod"):
+                raw_model = raw_model._orig_mod
             checkpoint = {
                 "step": step + 1,
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
-                "model": model.state_dict(),
+                "model": raw_model.state_dict(),
             }
             torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
         if ddp:

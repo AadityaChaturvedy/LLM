@@ -10,7 +10,7 @@ train_loop = 150000
 
 # Evaluation & Checkpointing
 eval_every = 2000
-eval_steps = 5
+eval_steps = 50
 save_every = 10000
 max_grad_norm = 1.0
 
@@ -28,13 +28,13 @@ english_vocab_size = 0
 if LANGUAGE == "hindi":
     hindi_vocab_size = 64_000
     vocab_size = hindi_vocab_size
-    embedding_dim = 1024
+    embedding_dim = 1536
     num_layers = 24
     num_heads = 16
-    d_model = 1024
+    d_model = 1536
     hidden_dim_ffn = 4096
-    batch_size_encoder = 4
-    accumulation_steps = 16
+    batch_size_encoder = 2
+    accumulation_steps = 32
     context_length = 512
 elif LANGUAGE == "hinglish":
     hindi_vocab_size = 100_000

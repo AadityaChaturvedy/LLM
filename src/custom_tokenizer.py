@@ -4,13 +4,14 @@ from src.config import (
     hindi_vocab_size, english_vocab_size,
     TOKENIZER_VOCAB_PATH,
     TOKENIZER_MERGES_PATH,
+    TOTAL_ROWS,
 )
 
 class CustomTokenizer:
     def __init__(self):
         self.tokenizer = CustomIndicBPE()
 
-    def train(self, language, max_docs_hindi=hindi_vocab_size, max_docs_english=english_vocab_size):
+    def train(self, language, max_docs_hindi=TOTAL_ROWS, max_docs_english=TOTAL_ROWS):
 
         if language == "hinglish":
             # Train Hindi alone

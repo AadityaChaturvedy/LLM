@@ -48,7 +48,7 @@ class CustomIndicBPE:
         self._cache       : dict             = {}
 
     # ------------------------------------------------------------------ train
-    def train(self, text_iterator, vocab_size, max_docs, recalc_every=500):
+    def train(self, text_iterator, vocab_size, max_docs, recalc_every=2000):
         # 1. word frequencies
         print(f"[train] reading up to {max_docs} docs …")
         word_counts: defaultdict = defaultdict(int)
@@ -62,7 +62,6 @@ class CustomIndicBPE:
             if doc_count >= max_docs:
                 break
         print(f"[train] unique pre-tokens={len(word_counts):,}  total={sum(word_counts.values()):,}")
-        self._build_merge_ranks()
 
         # 2. base vocab
         unique_chars: set = set()
@@ -197,6 +196,7 @@ class CustomIndicBPE:
 
         pbar.close()
         print(f"[train] done. vocab={len(self.vocab):,}  merges={len(self.merges):,}")
+        self._build_merge_ranks()
         self._cache = {}
 
     def _build_merge_ranks(self):
@@ -207,6 +207,9 @@ class CustomIndicBPE:
         if word_str in self._cache:
             return self._cache[word_str]
         
+        if len(self._cache) >= 100000:
+            self._cache.clear()
+            
         word = list(word_str)
         if len(word) < 2:
             self._cache[word_str] = word

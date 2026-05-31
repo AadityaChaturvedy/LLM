@@ -121,7 +121,7 @@ class Encoder:
             all_ids = [id_ for doc_ids in results for id_ in doc_ids]
 
         # Save as uint16 — vocab < 65536 so this is safe and halves disk/RAM
-        all_tokens = np.array(all_ids, dtype=np.uint32)
+        all_tokens = np.array(all_ids, dtype=np.uint16)
         np.save(TOKENIZED_DATA_PATH, all_tokens)
 
         print(f"[encoder] Saved {all_tokens.shape[0]:,} tokens → {TOKENIZED_DATA_PATH}")
