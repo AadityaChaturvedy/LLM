@@ -28,8 +28,10 @@ def iter_dataset_rows(dataset, total_rows, desc):
 
 def get_batch(data, batch_size, context_length):
     ix = torch.randint(0, len(data) - context_length - 1, (batch_size,))
-    x = torch.stack([data[i: i + context_length] for i in ix])
-    y = torch.stack([data[i + 1: i + context_length + 1] for i in ix])
+    offsets = torch.arange(context_length, device=ix.device)
+    indices = ix.unsqueeze(1) + offsets.unsqueeze(0)
+    x = data[indices]
+    y = data[indices + 1]
     return x, y
 
 
