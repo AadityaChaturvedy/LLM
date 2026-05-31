@@ -23,6 +23,7 @@ log/
 # Data and checkpoints
 data/
 checkpoints/
+all_checkpoints/
 
 # Plots and reports
 loss.png

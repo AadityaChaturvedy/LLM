@@ -54,10 +54,10 @@ else:
     num_layers = 12
     num_heads = 12
     d_model = 768
-    hidden_dim_ffn = 3072     
-    batch_size_encoder = 16       
-    accumulation_steps = 8       
-    context_length = 256      
+    hidden_dim_ffn = 3072 
+    batch_size_encoder = 16
+    accumulation_steps = 8
+    context_length = 256
 
 # File Paths
 TOKENIZER_DIR = os.path.join("data", LANGUAGE)
