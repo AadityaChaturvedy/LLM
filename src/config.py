@@ -6,7 +6,7 @@ temperature = 0.7
 top_k = 50
 
 # Training Loop
-train_loop = 150000
+train_loop = 122100
 
 # Evaluation & Checkpointing
 eval_every = 2000
@@ -15,7 +15,7 @@ save_every = 10000
 max_grad_norm = 1.0
 
 # Tokenizer & Dataset Rows
-TOTAL_ROWS = 500_000
+TOTAL_ROWS = 10_000_000
 batch_size_tokenizer = 1000
 
 # Language Mode: 'english' or 'hindi' or 'hinglish'

@@ -93,11 +93,11 @@ def main():
             log_line(f"Tokenized data not found for language '{LANGUAGE}'. Starting dataset preparation on rank 0...")
             if LANGUAGE == "hindi":
                 tokenizer = CustomTokenizer()
-                tokenizer.train("hindi", max_docs_hindi=TOTAL_ROWS)
+                tokenizer.train("hindi", max_docs_hindi=min(1000000, TOTAL_ROWS))
                 dataset = BilingualHindiDataset(hindi_ratio=1.0)
             elif LANGUAGE == "hinglish":
                 tokenizer = CustomTokenizer()
-                tokenizer.train("hinglish", max_docs_hindi=TOTAL_ROWS, max_docs_english=TOTAL_ROWS)
+                tokenizer.train("hinglish", max_docs_hindi=min(1000000, TOTAL_ROWS), max_docs_english=min(1000000, TOTAL_ROWS))
                 dataset = BilingualHindiDataset()
             else:
                 tokenizer = Tokenizer()
