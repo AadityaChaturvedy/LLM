@@ -1,4 +1,5 @@
 from datasets import load_dataset
+import random
 
 class FineWebDataset:
     def __init__(self, name="sample-10BT", split="train", streaming=True):
@@ -14,3 +15,45 @@ class FineWebDataset:
             print(f"URL: {row['url']}")
             print(f"Token Count: {row['token_count']}")
             print(f"Text Snippet: {row['text'][:250]}...\n")
+
+class BilingualHindiDataset:
+    def __init__(self, hindi_ratio=0.7, split="train", streaming=True):
+        print("Connecting to Sangraha (Hindi Verified)...")
+        # Load verified Hindi Devanagari subset from Sangraha
+        self.hindi_dataset = load_dataset(
+            "ai4bharat/sangraha",
+            data_dir="verified/hin",
+            split=split,
+            streaming=streaming
+        )
+        self.hindi_ratio = hindi_ratio
+        if self.hindi_ratio < 1.0:
+            print("Connecting to FineWeb (English)...")
+            self.english_dataset = load_dataset(
+                "HuggingFaceFW/fineweb",
+                name="sample-10BT",
+                split=split,
+                streaming=streaming
+            )
+        else:
+            self.english_dataset = None
+        self.dataset = self
+        print("Dataset stream ready!")
+
+    def __iter__(self):
+        hindi_iter = iter(self.hindi_dataset)
+        english_iter = iter(self.english_dataset) if self.english_dataset is not None else None
+        
+        while True:
+            if self.hindi_ratio >= 1.0 or random.random() < self.hindi_ratio:
+                try:
+                    yield next(hindi_iter)
+                except StopIteration:
+                    hindi_iter = iter(self.hindi_dataset)
+                    yield next(hindi_iter)
+            else:
+                try:
+                    yield next(english_iter)
+                except StopIteration:
+                    english_iter = iter(self.english_dataset)
+                    yield next(english_iter)

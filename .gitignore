@@ -23,7 +23,11 @@ log/
 # Data and checkpoints
 data/
 checkpoints/
+all_checkpoints/
 
 # Plots and reports
-loss_comparison.png
+loss.png
 loss_delta.png
+
+# Benchmark data
+hindi_XLSum_v2.0/
