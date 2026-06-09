@@ -9,6 +9,12 @@ from transformers import AutoTokenizer
 import string
 from collections import Counter
 
+import sys
+import os
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
 from src.custom_tokenizer import CustomTokenizer
 from src.config import (
     vocab_size, embedding_dim, context_length,
@@ -19,10 +25,18 @@ from src.model import GPT
 
 # --- Configuration ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-CHECKPOINT_PATH = "checkpoints/ckpt_step_120000.pt"
+CHECKPOINT_PATH = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
 NUM_PPL_SAMPLES = 100
 NUM_XQUAD_SAMPLES = 50
 LLAMA_TOKENIZER = "meta-llama/Meta-Llama-3-8B"
+
+def arabic_to_devanagari(text):
+    mapping = str.maketrans('0123456789', '०१२३४५६७८९')
+    return text.translate(mapping)
+
+def devanagari_to_arabic(text):
+    mapping = str.maketrans('०१२३४५६७८९', '0123456789')
+    return text.translate(mapping)
 
 def load_model_and_tokenizer():
     print(f"Using device: {DEVICE}")
@@ -42,14 +56,18 @@ def load_model_and_tokenizer():
         hidden_dim_ffn=hidden_dim_ffn
     )
 
-    if not os.path.exists(CHECKPOINT_PATH):
-        print(f"Checkpoint {CHECKPOINT_PATH} not found. Defaulting to latest.")
-        available = sorted([f for f in os.listdir("checkpoints") if f.endswith(".pt")])
+    CHECKPOINT_ABS_PATH = os.path.join(BASE_DIR, CHECKPOINT_PATH)
+    if not os.path.exists(CHECKPOINT_ABS_PATH):
+        print(f"Checkpoint {CHECKPOINT_ABS_PATH} not found. Defaulting to latest.")
+        ckpt_dir = os.path.join(BASE_DIR, "checkpoints")
+        if not os.path.exists(ckpt_dir):
+            raise FileNotFoundError(f"Checkpoints directory not found at {ckpt_dir}")
+        available = sorted([f for f in os.listdir(ckpt_dir) if f.endswith(".pt")])
         if not available:
             raise FileNotFoundError("No checkpoints found.")
-        cp_path = os.path.join("checkpoints", available[-1])
+        cp_path = os.path.join(ckpt_dir, available[-1])
     else:
-        cp_path = CHECKPOINT_PATH
+        cp_path = CHECKPOINT_ABS_PATH
 
     print(f"Loading weights from {cp_path}...")
     checkpoint = torch.load(cp_path, map_location=DEVICE, weights_only=True)
@@ -151,7 +169,7 @@ def normalize_answer(s):
 def benchmark_xquad(model, tokenizer):
     print("\n--- 2. Extraction & Reading Comprehension (XQuAD-Hi) ---")
     try:
-        dataset = load_dataset("xquad", "xquad.hi", split="validation")
+        dataset = load_dataset("google/xtreme", "XQuAD.hi", split="validation")
     except Exception as e:
         print(f"Failed to load XQuAD-Hi: {e}")
         return None, None
@@ -169,8 +187,9 @@ def benchmark_xquad(model, tokenizer):
         question = sample["question"]
         true_answer = sample["answers"]["text"][0]
 
-        prompt = f"सन्दर्भ: {context}\nप्रश्न: {question}\nउत्तर:"
-        
+        prompt = f"सन्दर्भ: {context}\nप्रश्न: {question}\nउत्तर: "
+        prompt = arabic_to_devanagari(prompt)
+
         enc = tokenizer.encode(prompt)
         ids = enc.ids if hasattr(enc, 'ids') else enc
         
@@ -185,7 +204,7 @@ def benchmark_xquad(model, tokenizer):
             logits = model(x)
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             token_str = tokenizer.decode([next_token.item()])
-            if '\n' in token_str or token_str.strip() == "":
+            if '\n' in token_str or '</s>' in token_str:
                 break
             generated_ids.append(next_token.item())
             x = torch.cat((x, next_token), dim=1)
@@ -233,8 +252,9 @@ def benchmark_reasoning(model, tokenizer):
     prompt = (
         "प्रश्न: राम के पास 5 सेब हैं। उसने 2 सेब खा लिए। उसके पास कितने सेब बचे?\nउत्तर: 3\n"
         "प्रश्न: सीता के पास 10 पेन हैं। उसने 4 पेन अपने दोस्त को दे दिए। उसके पास कितने पेन बचे?\nउत्तर: 6\n"
-        "प्रश्न: एक टोकरी में 8 केले हैं। 3 केले और डाल दिए गए। कुल कितने केले हुए?\nउत्तर:"
+        "प्रश्न: एक टोकरी में 8 केले हैं। 3 केले और डाल दिए गए। कुल कितने केले हुए?\nउत्तर: "
     )
+    prompt = arabic_to_devanagari(prompt)
     
     enc = tokenizer.encode(prompt)
     ids = enc.ids if hasattr(enc, 'ids') else enc
@@ -245,12 +265,13 @@ def benchmark_reasoning(model, tokenizer):
         logits = model(x)
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         token_str = tokenizer.decode([next_token.item()])
-        if '\n' in token_str or token_str.strip() == "":
+        if '\n' in token_str or '</s>' in token_str:
             break
         generated_ids.append(next_token.item())
         x = torch.cat((x, next_token), dim=1)
         
     answer = tokenizer.decode(generated_ids).strip()
+    answer = devanagari_to_arabic(answer)
     print(f"Few-Shot Math Prompt:\n{prompt}")
     print(f"Model generated answer: '{answer}'")
     
@@ -348,15 +369,95 @@ def benchmark_latency(model, tokenizer):
     print(f"Throughput: {tps:.2f} tokens/second")
     return tps
 
+@torch.no_grad()
+def benchmark_mmlu(model, tokenizer):
+    print("\n--- 6. MMLU-Style Multiple Choice (Log-Likelihood) ---")
+    
+    questions = [
+        {
+            "prompt": "प्रश्न: भारत का प्रथम प्रधानमंत्री कौन था?\nक) महात्मा गांधी\nख) जवाहरलाल नेहरू\nग) सुभाष चंद्र बोस\nघ) लाल बहादुर शास्त्री\nउत्तर: ",
+            "answer": "ख"
+        },
+        {
+            "prompt": "प्रश्न: पृथ्वी के वायुमंडल में सबसे अधिक कौन सी गैस है?\nक) ऑक्सीजन\nख) कार्बन डाइऑक्साइड\nग) नाइट्रोजन\nघ) आर्गन\nउत्तर: ",
+            "answer": "ग"
+        },
+        {
+            "prompt": "प्रश्न: गुरुत्वाकर्षण का सिद्धांत किसने दिया?\nक) अल्बर्ट आइंस्टीन\nख) गैलीलियो\nग) आइजैक न्यूटन\nघ) निकोला टेस्ला\nउत्तर: ",
+            "answer": "ग"
+        },
+        {
+            "prompt": "प्रश्न: कंप्यूटर का मस्तिष्क किसे कहा जाता है?\nक) मॉनिटर\nख) कीबोर्ड\nग) प्रोसेसर\nघ) माउस\nउत्तर: ",
+            "answer": "ग"
+        },
+        {
+            "prompt": "प्रश्न: सौरमंडल का सबसे बड़ा ग्रह कौन सा है?\nक) मंगल\nख) पृथ्वी\nग) बृहस्पति\nघ) शनि\nउत्तर: ",
+            "answer": "ग"
+        }
+    ]
+    
+    correct = 0
+    total = len(questions)
+    options = ["क", "ख", "ग", "घ"]
+    
+    for q in questions:
+        enc_prompt = tokenizer.encode(q["prompt"])
+        prompt_ids = enc_prompt.ids if hasattr(enc_prompt, 'ids') else enc_prompt
+        
+        best_loss = float('inf')
+        best_option = None
+        
+        for opt in options:
+            enc_opt = tokenizer.encode(opt)
+            opt_ids = enc_opt.ids if hasattr(enc_opt, 'ids') else enc_opt
+            
+            # Combine prompt and option
+            full_ids = prompt_ids + opt_ids
+            x = torch.tensor([full_ids[:-1]], dtype=torch.long, device=DEVICE)
+            y = torch.tensor([full_ids[1:]], dtype=torch.long, device=DEVICE)
+            
+            # Calculate logits
+            logits = model(x)
+            
+            # We only calculate the loss for the option tokens
+            start_idx = len(prompt_ids) - 1
+            end_idx = start_idx + len(opt_ids)
+            
+            loss = F.cross_entropy(
+                logits[0, start_idx:end_idx],
+                y[0, start_idx:end_idx],
+                reduction='mean'
+            ).item()
+            
+            if loss < best_loss:
+                best_loss = loss
+                best_option = opt
+                
+        print(f"{q['prompt']}{best_option} (Predicted)")
+        
+        if best_option == q["answer"]:
+            correct += 1
+            print("-> Correct\n")
+        else:
+            print(f"-> Incorrect (Expected {q['answer']})\n")
+            
+    accuracy = (correct / total) * 100
+    print(f"Evaluated {total} MMLU-style Hindi questions using Log-Likelihood.")
+    print(f"Accuracy: {accuracy:.1f}%")
+    return accuracy
+
 def main():
     print("Initializing Benchmark Suite...")
     model, tokenizer = load_model_and_tokenizer()
     
-    ppl = benchmark_perplexity(model, tokenizer)
-    em, f1 = benchmark_xquad(model, tokenizer)
+    ppl = None
+    em, f1 = None, None
+    #ppl = benchmark_perplexity(model, tokenizer)
+    #em, f1 = benchmark_xquad(model, tokenizer)
     math_correct = benchmark_reasoning(model, tokenizer)
     ratios = benchmark_tokenizer_efficiency(tokenizer)
     tps = benchmark_latency(model, tokenizer)
+    mmlu_acc = benchmark_mmlu(model, tokenizer)
     
     print("\n========================================================")
     print("               BENCHMARK RESULTS SUMMARY                ")
@@ -366,6 +467,7 @@ def main():
     print(f"Perplexity (Hi)    : {f'{ppl:.2f}' if ppl is not None else 'N/A'} (Wikipedia-Hi)")
     print(f"XQuAD-Hi (EM/F1)   : {f'{em:.1f}% / {f1:.1f}%' if em is not None else 'N/A'}")
     print(f"Few-Shot Math      : {'Pass' if math_correct else 'Fail'}")
+    print(f"Hindi MMLU         : {mmlu_acc:.1f}% Accuracy")
     if ratios:
         print(f"Tokenizer Ratio    : {ratios[0]:.2f} chars/token (Custom)")
         print(f"Llama-3 Tokenizer  : {ratios[1]:.2f} chars/token (Meta Llama 3)")

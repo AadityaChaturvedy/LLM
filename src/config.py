@@ -5,6 +5,10 @@ max_new_tokens = 128
 temperature = 0.7
 top_k = 50
 
+# Execution Toggles
+TRAIN_TOKENIZER = True
+TRAIN_LLM = False
+
 # Training Loop
 train_loop = 122100
 
@@ -15,7 +19,8 @@ save_every = 10000
 max_grad_norm = 1.0
 
 # Tokenizer & Dataset Rows
-TOTAL_ROWS = 10_000_000
+TOKENIZER_ROWS = 1_000_000
+LLM_ROWS = 10_000_000
 batch_size_tokenizer = 1000
 
 # Language Mode: 'english' or 'hindi' or 'hinglish'
@@ -25,12 +30,15 @@ hindi_vocab_size = 0
 english_vocab_size = 0
 
 # Model Dimensions (based on LANGUAGE mode)
+use_gqa = True
+
 if LANGUAGE == "hindi":
     hindi_vocab_size = 64_000
     vocab_size = hindi_vocab_size
     embedding_dim = 1792
     num_layers = 24
     num_heads = 16
+    num_kv_heads = 4
     d_model = 1792
     hidden_dim_ffn = 4864
     batch_size_encoder = 2
@@ -43,6 +51,7 @@ elif LANGUAGE == "hinglish":
     embedding_dim = 1024
     num_layers = 24
     num_heads = 16
+    num_kv_heads = 4
     d_model = 1024
     hidden_dim_ffn = 4096
     batch_size_encoder = 32
@@ -53,6 +62,7 @@ else:
     embedding_dim = 768
     num_layers = 12
     num_heads = 12
+    num_kv_heads = 4
     d_model = 768
     hidden_dim_ffn = 3072 
     batch_size_encoder = 16

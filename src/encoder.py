@@ -5,7 +5,7 @@ import multiprocessing as mp
 from functools import partial
 from src.custom_bpe import CustomIndicBPE, pre_tokenize
 from src.config import (
-    TOTAL_ROWS,
+    LLM_ROWS,
     TOKENIZED_DATA_PATH,
     TOKENIZER_MERGES_PATH,
     TOKENIZER_VOCAB_PATH,
@@ -108,7 +108,7 @@ class Encoder:
         if os.path.exists(temp_bin_path):
             os.remove(temp_bin_path)
 
-        print(f"[encoder] Streaming and encoding {TOTAL_ROWS:,} documents in batches of {batch_size:,} …")
+        print(f"[encoder] Streaming and encoding {LLM_ROWS:,} documents in batches of {batch_size:,} …")
         
         # Initialize a single persistent pool if multiprocessing is enabled
         pool = None
@@ -125,9 +125,9 @@ class Encoder:
                 batch_texts = []
                 total_processed = 0
 
-                pbar = tqdm(total=TOTAL_ROWS, desc="Processing")
+                pbar = tqdm(total=LLM_ROWS, desc="Processing")
                 for row in dataset:
-                    if total_processed >= TOTAL_ROWS:
+                    if total_processed >= LLM_ROWS:
                         break
                     if row and "text" in row:
                         batch_texts.append(row["text"])
@@ -140,9 +140,9 @@ class Encoder:
                         batch_texts = [] # Clear memory
                         
                 # Process remaining documents
-                if batch_texts and total_processed < TOTAL_ROWS:
-                    # Truncate remaining batch if it exceeds TOTAL_ROWS
-                    remaining_needed = TOTAL_ROWS - total_processed
+                if batch_texts and total_processed < LLM_ROWS:
+                    # Truncate remaining batch if it exceeds LLM_ROWS
+                    remaining_needed = LLM_ROWS - total_processed
                     batch_texts = batch_texts[:remaining_needed]
                     if batch_texts:
                         self._process_and_append_batch(batch_texts, f_bin, pool, num_workers)

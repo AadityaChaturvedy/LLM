@@ -1,0 +1,143 @@
+import os
+import argparse
+import torch
+import torch.nn.functional as F
+from datasets import load_dataset
+from tqdm import tqdm
+
+from src.config import context_length
+from src.eval_utils import load_model_and_tokenizer, arabic_to_devanagari
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+CHECKPOINT_PATH = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
+
+@torch.no_grad()
+def evaluate_sentiment(model, tokenizer, limit=None):
+    print("\n--- Loading ai4bharat/indic_glue IITP-MR-Hi ---")
+    try:
+        ds = load_dataset("ai4bharat/indic_glue", "iitp-mr.hi", split="test")
+    except Exception as e:
+        print(f"Failed to load dataset: {e}")
+        return
+
+    all_rows = []
+    for row in ds:
+        all_rows.append(row)
+            
+    import random
+    random.seed(42)
+    random.shuffle(all_rows)
+    
+    if limit is not None:
+        all_rows = all_rows[:limit]
+            
+    print(f"Loaded {len(all_rows)} questions.")
+    
+    correct = 0
+    total = 0
+    
+    pbar = tqdm(total=len(all_rows), desc="Evaluating Sentiment")
+    
+    # label 0 = Negative, 1 = Neutral, 2 = Positive
+    # Let's map these to Hindi strings to evaluate the likelihood
+    label_map = {
+        0: 'नकारात्मक',
+        1: 'तटस्थ',
+        2: 'सकारात्मक'
+    }
+
+    for row in all_rows:
+        text = row['text']
+        true_label = row['label']
+        
+        prompt = f"समीक्षा: {text}\nभावना: "
+            
+        prompt = arabic_to_devanagari(prompt)
+        enc_prompt = tokenizer.encode(prompt)
+        prompt_ids = enc_prompt.ids if hasattr(enc_prompt, 'ids') else enc_prompt
+        
+        if len(prompt_ids) == 0:
+            pbar.update(1)
+            continue
+            
+        best_loss = float('inf')
+        best_idx = None
+        
+        for idx in [0, 1, 2]:
+            opt_text = label_map[idx]
+            enc_opt = tokenizer.encode(" " + opt_text)
+            opt_ids = enc_opt.ids if hasattr(enc_opt, 'ids') else enc_opt
+            
+            if len(opt_ids) == 0:
+                continue
+                
+            full_ids = prompt_ids + opt_ids
+            
+            if len(full_ids) > context_length:
+                full_ids = full_ids[-context_length:]
+                prompt_len_in_full = len(full_ids) - len(opt_ids)
+            else:
+                prompt_len_in_full = len(prompt_ids)
+                
+            if prompt_len_in_full <= 0:
+                continue
+                
+            x = torch.tensor([full_ids[:-1]], dtype=torch.long, device=DEVICE)
+            y = torch.tensor([full_ids[1:]], dtype=torch.long, device=DEVICE)
+            
+            logits = model(x)
+            
+            start_idx = prompt_len_in_full - 1
+            max_end = len(full_ids) - 1
+            end_idx = min(start_idx + len(opt_ids), max_end)
+            
+            if end_idx <= start_idx:
+                continue
+            
+            loss = F.cross_entropy(
+                logits[0, start_idx:end_idx],
+                y[0, start_idx:end_idx],
+                reduction='sum'
+            ).item()
+            
+            if loss < best_loss:
+                best_loss = loss
+                best_idx = idx
+
+        if best_idx is None:
+            pbar.update(1)
+            continue
+                
+        if best_idx == true_label:
+            correct += 1
+            
+        total += 1
+        pbar.update(1)
+        
+        if total % 10 == 0:
+            pbar.set_description(f"Sentiment Acc: {(correct/total)*100:.1f}%")
+            
+    pbar.close()
+    
+    if total > 0:
+        accuracy = (correct / total) * 100
+        print(f"\n========================================================")
+        print(f"               SENTIMENT HINDI RESULTS                  ")
+        print(f"========================================================")
+        print(f"Questions Evaluated : {total}")
+        print(f"Correct Answers     : {correct}")
+        print(f"Final Accuracy      : {accuracy:.2f}%")
+        print(f"========================================================\n")
+    else:
+        print("No valid questions evaluated.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=None, help="Number of questions to evaluate (default: all)")
+    parser.add_argument("--checkpoint", type=str, default=CHECKPOINT_PATH, help="Path to the model checkpoint")
+    args = parser.parse_args()
+    
+    print("Initializing Sentiment Evaluator...")
+    model, tokenizer = load_model_and_tokenizer(DEVICE, args.checkpoint)
+    if model:
+        evaluate_sentiment(model, tokenizer, limit=args.limit)

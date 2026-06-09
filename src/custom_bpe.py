@@ -7,8 +7,24 @@ from collections import defaultdict
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
-# Devanagari pre-tokenizer
+# Devanagari pre-tokenizer & Acronym Transliteration
 # ---------------------------------------------------------------------------
+_ACRONYM_MAP = {
+    'A': 'ए', 'B': 'बी', 'C': 'सी', 'D': 'डी', 'E': 'ई', 'F': 'एफ', 
+    'G': 'जी', 'H': 'एच', 'I': 'आई', 'J': 'जे', 'K': 'के', 'L': 'एल', 
+    'M': 'एम', 'N': 'एन', 'O': 'ओ', 'P': 'पी', 'Q': 'क्यू', 'R': 'आर', 
+    'S': 'एस', 'T': 'टी', 'U': 'यू', 'V': 'वी', 'W': 'डब्लू', 'X': 'एक्स', 
+    'Y': 'वाई', 'Z': 'जेड'
+}
+
+def transliterate_acronyms(text: str) -> str:
+    # Match sequences of 2 to 7 uppercase English letters, optionally separated by dots
+    return re.sub(
+        r'\b[A-Z](?:\.?[A-Z]){1,6}\b', 
+        lambda m: ".".join(_ACRONYM_MAP[c] for c in m.group(0).replace('.', '')), 
+        text
+    )
+
 _DEVA_BLOCK  = r'\u0900-\u097F'
 _DEVA_DIGITS = r'\u0966-\u096F'
 
@@ -20,15 +36,37 @@ _DEVA_CLUSTER = (
     r')+'.format(d=_DEVA_BLOCK)
 )
 _PRETOK_RE = re.compile(
-    rf'{_DEVA_CLUSTER}|[{_DEVA_DIGITS}]+|[A-Za-z0-9]+|[^\w\s]',
+    rf'{_DEVA_CLUSTER}|[{_DEVA_DIGITS}]+|[A-Za-z0-9Ċ]+|[^\w\s]',
     re.UNICODE,
 )
 
-def pre_tokenize(text: str, devanagari_only: bool = False) -> list:
+def pre_tokenize(text: str, devanagari_only: bool = False, special_tokens: list = None) -> list:
+    if special_tokens:
+        pattern = r'(' + '|'.join(map(re.escape, special_tokens)) + r')'
+        chunks = re.split(pattern, text)
+        tokens = []
+        for chunk in chunks:
+            if not chunk:
+                continue
+            if chunk in special_tokens:
+                tokens.append(chunk)
+            else:
+                tokens.extend(_pre_tokenize_chunk(chunk, devanagari_only))
+        return tokens
+    else:
+        return _pre_tokenize_chunk(text, devanagari_only)
+
+def _pre_tokenize_chunk(text: str, devanagari_only: bool = False) -> list:
     text = unicodedata.normalize('NFC', text)
     if devanagari_only:
-        # Keep only Devanagari block (\u0900-\u097F), whitespace, and basic punctuation
-        text = re.sub(r'[^\u0900-\u097F\s,.?!()\-:;"\']', ' ', text)
+        # Transliterate Latin acronyms to Hindi phonetics before filtering
+        text = transliterate_acronyms(text)
+        
+        # Keep only Devanagari block (\u0900-\u097F), Latin digits (0-9), whitespace, and all punctuation/symbols
+        text = re.sub(r'[^\u0900-\u097F0-9\s!\"#$%&\'()*+,\-./:;<=>?@\[\\\]\^_`{|}~]', ' ', text)
+        
+    text = text.replace('\n', ' Ċ ')
+    
     tokens = []
     for chunk in re.split(r'(\s+)', text):
         if not chunk or chunk.isspace():
@@ -52,25 +90,37 @@ class CustomIndicBPE:
         self.devanagari_only = devanagari_only
 
     # ------------------------------------------------------------------ train
-    def train(self, text_iterator, vocab_size, max_docs, recalc_every=2000):
+    def train(self, text_iterator, vocab_size, max_docs, recalc_every=500):
         # 1. word frequencies
         print(f"[train] reading up to {max_docs} docs …")
         word_counts: defaultdict = defaultdict(int)
+        char_counts: defaultdict = defaultdict(int)
         doc_count = 0
         for doc in tqdm(text_iterator, desc="reading"):
             if not doc or "text" not in doc:
                 continue
-            for tok in pre_tokenize(doc["text"], devanagari_only=self.devanagari_only):
-                word_counts[tok] += 1
+            for tok in pre_tokenize(doc["text"], devanagari_only=self.devanagari_only, special_tokens=self.SPECIAL_TOKENS):
+                if tok not in self.SPECIAL_TOKENS:
+                    word_counts[tok] += 1
+                    for char in tok:
+                        char_counts[char] += 1
             doc_count += 1
             if doc_count >= max_docs:
                 break
         print(f"[train] unique pre-tokens={len(word_counts):,}  total={sum(word_counts.values()):,}")
 
+        # 1.5 Prune rare words and rare chars
+        min_word_freq = 3
+        min_char_freq = 100
+        
+        # Remove rare words entirely to focus merges on high-value tokens
+        word_counts = {w: cnt for w, cnt in word_counts.items() if cnt >= min_word_freq}
+        # Keep only characters that appear frequently enough
+        unique_chars = {c for c, cnt in char_counts.items() if cnt >= min_char_freq}
+        
+        print(f"[train] after pruning: unique pre-tokens={len(word_counts):,}  base chars={len(unique_chars):,}")
+
         # 2. base vocab
-        unique_chars: set = set()
-        for w in word_counts:
-            unique_chars.update(w)
         self.vocab       = list(self.SPECIAL_TOKENS) + sorted(unique_chars)
         self.token_to_id = {t: i for i, t in enumerate(self.vocab)}
         self.id_to_token = {i: t for i, t in enumerate(self.vocab)}
@@ -81,7 +131,6 @@ class CustomIndicBPE:
         words_list = list(word_counts.keys())
         words = [list(w) for w in words_list]          # mutable sequences
         freqs = [word_counts[w] for w in words_list]
-        W = len(words)
 
         num_merges = vocab_size - len(self.vocab)
         if num_merges <= 0:
@@ -168,19 +217,17 @@ class CustomIndicBPE:
                             pair_to_wids[lp2].add(wid)
                             heapq.heappush(heap, (-pair_counts[lp2], lp2))
 
+                        # --- add new right-neighbour pair ---
+                        if i + 2 < len(word):
+                            rp2 = (merged, word[i+2])
+                            pair_counts[rp2] += freq
+                            pair_to_wids[rp2].add(wid)
+                            heapq.heappush(heap, (-pair_counts[rp2], rp2))
+
                         i += 2
                     else:
                         new_word.append(word[i])
                         i += 1
-
-                # right-of-merged pair (merged is last token appended, check its right)
-                # find last occurrence of merged in new_word and check right neighbour
-                for k in range(len(new_word)-1):
-                    if new_word[k] == merged:
-                        rp2 = (merged, new_word[k+1])
-                        pair_counts[rp2]  += freq
-                        pair_to_wids[rp2].add(wid)
-                        heapq.heappush(heap, (-pair_counts[rp2], rp2))
 
                 words[wid] = new_word
 
@@ -209,7 +256,7 @@ class CustomIndicBPE:
 
     def _encode_word(self, word_str: str) -> list:
         if word_str in self._cache:
-            return self._cache[word_str]
+            return list(self._cache[word_str])
         
         if len(self._cache) >= 100000:
             self._cache.clear()
@@ -217,54 +264,38 @@ class CustomIndicBPE:
         word = list(word_str)
         if len(word) < 2:
             self._cache[word_str] = word
-            return word
+            return list(word)
 
-        pairs = {}
-        for i in range(len(word) - 1):
-            p = (word[i], word[i+1])
-            if p in self._merge_ranks:
-                pairs[i] = self._merge_ranks[p]
-
-        while pairs:
-            best_i = min(pairs, key=lambda i: pairs[i])
+        while True:
+            best_i = -1
+            best_rank = float('inf')
             
-            # Guard: stale index after previous merges
-            if best_i >= len(word) - 1:
-                pairs.pop(best_i)
-                continue
-            
-            p1, p2 = word[best_i], word[best_i + 1]
-            if (p1, p2) not in self._merge_ranks:
-                pairs.pop(best_i)
-                continue
+            for i in range(len(word) - 1):
+                p = (word[i], word[i+1])
+                if p in self._merge_ranks and self._merge_ranks[p] < best_rank:
+                    best_rank = self._merge_ranks[p]
+                    best_i = i
+                    
+            if best_i == -1:
+                break
                 
-            merged = p1 + p2
+            merged = word[best_i] + word[best_i + 1]
             word[best_i] = merged
             del word[best_i + 1]
 
-            pairs.pop(best_i, None)
-            pairs.pop(best_i - 1, None)
-
-            if best_i - 1 >= 0:
-                p = (word[best_i - 1], merged)
-                if p in self._merge_ranks:
-                    pairs[best_i - 1] = self._merge_ranks[p]
-
-            if best_i < len(word) - 1:
-                p = (merged, word[best_i + 1])
-                if p in self._merge_ranks:
-                    pairs[best_i] = self._merge_ranks[p]
-                else:
-                    pairs.pop(best_i, None)
-
         self._cache[word_str] = word
-        return word
+        return list(word)
 
     def encode(self, text: str):
         tokens = []
-        for pt in pre_tokenize(text, devanagari_only=self.devanagari_only):
-            tokens.extend(self._encode_word(pt))
-        unk = self.token_to_id.get("<unk>", 0)
+        for pt in pre_tokenize(text, devanagari_only=self.devanagari_only, special_tokens=self.SPECIAL_TOKENS):
+            if pt in self.SPECIAL_TOKENS:
+                tokens.append(pt)
+            else:
+                tokens.extend(self._encode_word(pt))
+        unk = self.token_to_id.get("<unk>")
+        if unk is None:
+            raise ValueError("'<unk>' missing from vocabulary")
         ids = [self.token_to_id.get(t, unk) for t in tokens]
 
         class _Out:
@@ -279,8 +310,17 @@ class CustomIndicBPE:
             tok = self.id_to_token.get(idx, "<unk>")
             if tok in special:
                 continue
+                
+            # Handle newline token explicitly to avoid unwanted spaces
+            if tok == 'ĠĊ' or tok == 'Ċ':
+                out += '\n'
+                continue
+                
             out += (' ' + tok[1:]) if tok.startswith('Ġ') else tok
-        return out.strip()
+            
+        if out.startswith(' '):
+            out = out[1:]
+        return out.rstrip(' ')
 
     # ------------------------------------------------------------------ I/O
     def save(self, vocab_path: str, merges_path: str):

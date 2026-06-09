@@ -4,7 +4,8 @@ from tokenizers import ByteLevelBPETokenizer
 from tqdm import tqdm
 
 from src.config import (
-    TOTAL_ROWS,
+    TOKENIZER_ROWS,
+    vocab_size, 
     TOKENIZER_DIR,
     TOKENIZER_JSON_PATH,
     batch_size_tokenizer,
@@ -23,7 +24,7 @@ class Tokenizer:
     
     def batch_iterator(self, dataset):
         batch = []
-        for row in iter_dataset_rows(dataset, TOTAL_ROWS, desc="Tokenizing"):
+        for row in iter_dataset_rows(dataset, TOKENIZER_ROWS, desc="Tokenizing"):
             batch.append(row["text"])
             if len(batch) == batch_size_tokenizer:
                 yield batch

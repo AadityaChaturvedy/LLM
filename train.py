@@ -17,9 +17,10 @@ from src.tokenizer_utils import Tokenizer
 from src.custom_tokenizer import CustomTokenizer
 from src.encoder import Encoder
 from src.config import (
+    TRAIN_TOKENIZER, TRAIN_LLM,
     eval_every, eval_steps, save_every, max_grad_norm,
     train_loop,
-    vocab_size, embedding_dim, TOTAL_ROWS,
+    vocab_size, embedding_dim, LLM_ROWS, TOKENIZER_ROWS,
     context_length, batch_size_encoder, 
     num_heads, d_model,
     hidden_dim_ffn,
@@ -93,16 +94,16 @@ def main():
     scaler = torch.amp.GradScaler("cuda") if use_scaler else None
 
     # Only Master process handles tokenizer setup & dataset tokenization
-    if is_master_process:
+    if is_master_process and TRAIN_TOKENIZER:
         if not os.path.exists(TOKENIZER_MERGES_PATH) and not os.path.exists(TOKENIZER_VOCAB_PATH):
             log_line(f"Tokenized data not found for language '{LANGUAGE}'. Starting dataset preparation on rank 0...")
             if LANGUAGE == "hindi":
                 tokenizer = CustomTokenizer()
-                tokenizer.train("hindi", max_docs_hindi=min(1000000, TOTAL_ROWS))
+                tokenizer.train("hindi", max_docs_hindi=TOKENIZER_ROWS)
                 dataset = BilingualHindiDataset(hindi_ratio=1.0)
             elif LANGUAGE == "hinglish":
                 tokenizer = CustomTokenizer()
-                tokenizer.train("hinglish", max_docs_hindi=min(1000000, TOTAL_ROWS), max_docs_english=min(1000000, TOTAL_ROWS))
+                tokenizer.train("hinglish", max_docs_hindi=TOKENIZER_ROWS, max_docs_english=TOKENIZER_ROWS)
                 dataset = BilingualHindiDataset()
             else:
                 tokenizer = Tokenizer()
@@ -125,6 +126,12 @@ def main():
     # All processes synchronize here before loading tokenized data
     if ddp:
         dist.barrier()
+
+    if not TRAIN_LLM:
+        log_line("TRAIN_LLM is set to False in config. Exiting.")
+        if ddp:
+            dist.destroy_process_group()
+        return
 
     # Instantiate GPT Model
     model = GPT(

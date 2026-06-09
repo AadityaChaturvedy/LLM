@@ -9,7 +9,8 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 def apply_rotary_pos_emb(q, k, cos, sin):
-    # q, k: [B, H, T, d_k]
+    # q: [B, num_heads, T, d_k]
+    # k: [B, num_kv_heads, T, d_k]
     # cos, sin: [T, d_k]
     cos = cos.unsqueeze(0).unsqueeze(1) # [1, 1, T, d_k]
     sin = sin.unsqueeze(0).unsqueeze(1) # [1, 1, T, d_k]
@@ -49,17 +50,21 @@ class RotaryEmbedding(nn.Module):
             self.sin_cached[:seq_len].to(device=x.device, dtype=x.dtype),
         )
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads, d_model):
+class GroupedQueryAttention(nn.Module):
+    def __init__(self, num_heads, num_kv_heads, d_model):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        assert num_heads % num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
+        
         self.d_k = d_model // num_heads
         assert self.d_k % 2 == 0, "d_k must be even for Rotary Embeddings"
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.n_rep = self.num_heads // self.num_kv_heads
 
-        self.wq = nn.Linear(d_model, d_model, bias=False)
-        self.wk = nn.Linear(d_model, d_model, bias=False)
-        self.wv = nn.Linear(d_model, d_model, bias=False)
+        self.wq = nn.Linear(d_model, num_heads * self.d_k, bias=False)
+        self.wk = nn.Linear(d_model, num_kv_heads * self.d_k, bias=False)
+        self.wv = nn.Linear(d_model, num_kv_heads * self.d_k, bias=False)
         self.out_linear = nn.Linear(d_model, d_model, bias=False)
         
         self.rotary_emb = RotaryEmbedding(self.d_k)
@@ -69,12 +74,17 @@ class MultiHeadAttention(nn.Module):
 
         # Linear projections
         Q = self.wq(x_norm).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
-        K = self.wk(x_norm).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
-        V = self.wv(x_norm).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.wk(x_norm).view(B, T, self.num_kv_heads, self.d_k).transpose(1, 2)
+        V = self.wv(x_norm).view(B, T, self.num_kv_heads, self.d_k).transpose(1, 2)
 
         # Apply RoPE
         cos, sin = self.rotary_emb(Q, seq_len=T)
         Q, K = apply_rotary_pos_emb(Q, K, cos, sin)
+
+        # Repeat KV heads to match num_heads
+        if self.n_rep > 1:
+            K = K.repeat_interleave(self.n_rep, dim=1)
+            V = V.repeat_interleave(self.n_rep, dim=1)
 
         # Efficient scaled dot-product attention
         attn_output = torch.nn.functional.scaled_dot_product_attention(

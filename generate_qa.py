@@ -152,14 +152,14 @@ def main():
     )
     
     # 3. Load Checkpoint
-    checkpoint_path = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
+    checkpoint_path = "sft_checkpoints/ckpt_sft_epoch_3.pt"
     if not os.path.exists(checkpoint_path):
         print(f"Could not find exact checkpoint: {checkpoint_path}")
-        available = [f for f in os.listdir("sft_checkpoints_instruct") if f.endswith(".pt")]
+        available = [f for f in os.listdir("sft_checkpoints") if f.endswith(".pt")]
         if not available:
-            print("No checkpoints found in sft_checkpoints_instruct/ folder!")
+            print("No checkpoints found in sft_checkpoints/ folder!")
             return
-        checkpoint_path = os.path.join("sft_checkpoints_instruct", sorted(available)[-1])
+        checkpoint_path = os.path.join("sft_checkpoints", sorted(available)[-1])
         print(f"Defaulting to latest available checkpoint: {checkpoint_path}")
         
     print(f"Loading weights from {checkpoint_path}...")
@@ -198,12 +198,11 @@ def main():
                 continue
                 
             prompt = arabic_to_devanagari(prompt)
-            formatted_prompt = f"प्रश्न: {prompt}\nउत्तर: "
             
             generate(
                 model=model,
                 tokenizer=tokenizer,
-                prompt=formatted_prompt,
+                prompt=prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=0.1,  # Low temperature is required for Extractive QA
                 top_k=top_k,
