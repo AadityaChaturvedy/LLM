@@ -85,7 +85,7 @@ def evaluate_sentiment(model, tokenizer, limit=None):
             x = torch.tensor([full_ids[:-1]], dtype=torch.long, device=DEVICE)
             y = torch.tensor([full_ids[1:]], dtype=torch.long, device=DEVICE)
             
-            logits = model(x)
+            logits, _ = model(x)
             
             start_idx = prompt_len_in_full - 1
             max_end = len(full_ids) - 1
@@ -98,7 +98,7 @@ def evaluate_sentiment(model, tokenizer, limit=None):
                 logits[0, start_idx:end_idx],
                 y[0, start_idx:end_idx],
                 reduction='sum'
-            ).item()
+            ).item() / max(1, end_idx - start_idx)
             
             if loss < best_loss:
                 best_loss = loss

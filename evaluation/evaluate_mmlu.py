@@ -154,7 +154,7 @@ def evaluate_mmlu(model, tokenizer, limit=None):
             x = torch.tensor([full_ids[:-1]], dtype=torch.long, device=DEVICE)
             y = torch.tensor([full_ids[1:]], dtype=torch.long, device=DEVICE)
             
-            logits = model(x)
+            logits, _ = model(x)
             
             start_idx = prompt_len_in_full - 1
             end_idx = start_idx + len(opt_ids)

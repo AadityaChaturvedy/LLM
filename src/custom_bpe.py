@@ -110,13 +110,19 @@ class CustomIndicBPE:
         print(f"[train] unique pre-tokens={len(word_counts):,}  total={sum(word_counts.values()):,}")
 
         # 1.5 Prune rare words and rare chars
+        import string
         min_word_freq = 3
         min_char_freq = 100
         
         # Remove rare words entirely to focus merges on high-value tokens
         word_counts = {w: cnt for w, cnt in word_counts.items() if cnt >= min_word_freq}
         # Keep only characters that appear frequently enough
-        unique_chars = {c for c, cnt in char_counts.items() if cnt >= min_char_freq}
+        if self.devanagari_only:
+            devanagari_chars = {chr(cp) for cp in range(0x0900, 0x0980)}
+            required_chars = devanagari_chars | set("ĠĊ0123456789") | set(string.punctuation) | {"।", "॥"}
+            unique_chars = required_chars
+        else:
+            unique_chars = {c for c, cnt in char_counts.items() if cnt >= min_char_freq}
         
         print(f"[train] after pruning: unique pre-tokens={len(word_counts):,}  base chars={len(unique_chars):,}")
 

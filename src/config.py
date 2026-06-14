@@ -7,19 +7,21 @@ top_k = 50
 
 # Execution Toggles
 TRAIN_TOKENIZER = True
-TRAIN_LLM = False
+TRAIN_LLM = True
 
 # Training Loop
-train_loop = 122100
+train_loop = 29000
 
 # Evaluation & Checkpointing
-eval_every = 2000
+eval_every = 500
 eval_steps = 50
 save_every = 10000
 max_grad_norm = 1.0
+patience = 5
+min_delta = 0.001
 
 # Tokenizer & Dataset Rows
-TOKENIZER_ROWS = 1_000_000
+TOKENIZER_ROWS = 10_000
 LLM_ROWS = 10_000_000
 batch_size_tokenizer = 1000
 
@@ -35,15 +37,15 @@ use_gqa = True
 if LANGUAGE == "hindi":
     hindi_vocab_size = 64_000
     vocab_size = hindi_vocab_size
-    embedding_dim = 1792
+    embedding_dim = 1280
+    d_model = 1280
     num_layers = 24
     num_heads = 16
     num_kv_heads = 4
-    d_model = 1792
-    hidden_dim_ffn = 4864
-    batch_size_encoder = 2
-    accumulation_steps = 32
-    context_length = 512
+    hidden_dim_ffn = 3584
+    batch_size_encoder = 13
+    accumulation_steps = 16
+    context_length = 1024
 elif LANGUAGE == "hinglish":
     hindi_vocab_size = 100_000
     english_vocab_size = 28_000
@@ -54,9 +56,9 @@ elif LANGUAGE == "hinglish":
     num_kv_heads = 4
     d_model = 1024
     hidden_dim_ffn = 4096
-    batch_size_encoder = 32
-    accumulation_steps = 4
-    context_length = 512
+    batch_size_encoder = 4
+    accumulation_steps = 8
+    context_length = 1024
 else:
     vocab_size = 52_000
     embedding_dim = 768
@@ -65,9 +67,9 @@ else:
     num_kv_heads = 4
     d_model = 768
     hidden_dim_ffn = 3072 
-    batch_size_encoder = 16
+    batch_size_encoder = 8
     accumulation_steps = 8
-    context_length = 256
+    context_length = 512
 
 # File Paths
 TOKENIZER_DIR = os.path.join("data", LANGUAGE)

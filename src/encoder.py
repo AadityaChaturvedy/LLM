@@ -34,6 +34,50 @@ def get_batch(data, batch_size, context_length):
     y = data[indices + 1].astype(np.int64)
     return torch.from_numpy(x), torch.from_numpy(y)
 
+import threading
+import queue
+
+class TokenPrefetcher:
+    def __init__(self, data, batch_size, context_length, q_size=8, num_workers=2):
+        self.data = data
+        self.batch_size = batch_size
+        self.context_length = context_length
+        self.q = queue.Queue(maxsize=q_size)
+        self.stop_event = threading.Event()
+        self.workers = []
+        for _ in range(num_workers):
+            t = threading.Thread(target=self._worker, daemon=True)
+            t.start()
+            self.workers.append(t)
+
+    def _worker(self):
+        while not self.stop_event.is_set():
+            xb, yb = get_batch(self.data, self.batch_size, self.context_length)
+            # Pin memory for faster host-to-device transfer
+            xb = xb.pin_memory()
+            yb = yb.pin_memory()
+            try:
+                # Wait for up to 1s to allow checking stop_event periodically
+                self.q.put((xb, yb), timeout=1)
+            except queue.Full:
+                continue
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while not self.stop_event.is_set():
+            try:
+                return self.q.get(timeout=1)
+            except queue.Empty:
+                continue
+        raise StopIteration
+
+    def stop(self):
+        self.stop_event.set()
+        for w in self.workers:
+            w.join()
+
 
 # ---------------------------------------------------------------------------
 # Module-level state for worker processes
@@ -50,11 +94,17 @@ def _worker_init(vocab_path: str, merges_path: str):
     _worker_tokenizer.load(vocab_path, merges_path)
 
 
+def token_storage_dtype(vocab_size):
+    return np.uint16 if vocab_size <= np.iinfo(np.uint16).max else np.uint32
+
+
 def _encode_doc(text: str) -> list:
-    """Encode a single document text → list of uint16-safe ints."""
+    """Encode a single document text → list of uint16/uint32-safe ints."""
     if not text or not text.strip():
         return []
-    return _worker_tokenizer.encode(text).ids
+    ids = _worker_tokenizer.encode(text).ids
+    eos_id = _worker_tokenizer.token_to_id["</s>"]
+    return ids + [eos_id]
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +125,11 @@ class Encoder:
     def _process_and_append_batch(self, texts, f_bin, pool, num_workers):
         if num_workers == 0 or pool is None:
             batch_ids = []
+            eos_id = self.tokenizer.token_to_id["</s>"]
             for text in texts:
-                batch_ids.extend(self.tokenizer.encode(text).ids)
+                if text and text.strip():
+                    batch_ids.extend(self.tokenizer.encode(text).ids)
+                    batch_ids.append(eos_id)
         else:
             chunk_size = max(1, len(texts) // (num_workers * 20))
             results = list(
@@ -84,8 +137,11 @@ class Encoder:
             )
             batch_ids = [id_ for doc_ids in results for id_ in doc_ids]
 
-        # Convert to uint16 and write to binary file
-        batch_arr = np.array(batch_ids, dtype=np.uint16)
+        # Convert to appropriate dtype and write to binary file
+        dtype = token_storage_dtype(len(self.tokenizer.vocab))
+        if batch_ids and max(batch_ids) > np.iinfo(dtype).max:
+            raise ValueError(f"Token id exceeds storage dtype limit: {dtype}")
+        batch_arr = np.array(batch_ids, dtype=dtype)
         batch_arr.tofile(f_bin)
 
     def EncodeTokens(self, dataset, num_workers: int = None):
@@ -160,7 +216,8 @@ class Encoder:
         print(f"[encoder] Finished encoding. Loading binary file and saving to {TOKENIZED_DATA_PATH} …")
         
         # Load the flat binary file and save as standard npy
-        all_tokens = np.fromfile(temp_bin_path, dtype=np.uint16)
+        dtype = token_storage_dtype(len(self.tokenizer.vocab))
+        all_tokens = np.fromfile(temp_bin_path, dtype=dtype)
         np.save(TOKENIZED_DATA_PATH, all_tokens)
         
         if os.path.exists(temp_bin_path):

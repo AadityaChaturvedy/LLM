@@ -168,6 +168,15 @@ def main():
     ckpt_hidden_ffn = new_state_dict["blocks.0.ffn.w_down.weight"].shape[1]
     ckpt_num_layers = sum(1 for k in new_state_dict.keys() if k.endswith(".mha.wq.weight"))
     ckpt_num_heads = 16 # Hardcoding to 16 since d_model=1024 for the 252M architecture (1024 // 64 = 16)
+ 
+    # Detect GQA parameters from checkpoint shapes
+    use_gqa = False
+    num_kv_heads = ckpt_num_heads
+    if "blocks.0.mha.wk.weight" in new_state_dict:
+        wk_out_features = new_state_dict["blocks.0.mha.wk.weight"].shape[0]
+        d_k = ckpt_d_model // ckpt_num_heads
+        num_kv_heads = wk_out_features // d_k
+        use_gqa = num_kv_heads < ckpt_num_heads
 
     model = GPT(
         vocab_size=ckpt_vocab_size,
@@ -175,8 +184,10 @@ def main():
         context_length=context_length,
         num_layers=ckpt_num_layers,
         num_heads=ckpt_num_heads,
+        num_kv_heads=num_kv_heads,
         d_model=ckpt_d_model,
-        hidden_dim_ffn=ckpt_hidden_ffn
+        hidden_dim_ffn=ckpt_hidden_ffn,
+        use_gqa=use_gqa
     )
 
     model.load_state_dict(new_state_dict)

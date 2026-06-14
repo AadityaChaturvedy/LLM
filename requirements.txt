@@ -1,5 +1,9 @@
-datasets 
-tokenizers 
-tqdm 
-numpy 
-torch  
+datasets
+tokenizers
+tqdm
+numpy
+torch
+matplotlib
+transformers
+peft
+bitsandbytes

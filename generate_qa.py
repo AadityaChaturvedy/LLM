@@ -11,7 +11,7 @@ from src.config import (
     vocab_size, embedding_dim, context_length,
     num_layers, num_heads, d_model, hidden_dim_ffn,
     TOKENIZER_VOCAB_PATH, TOKENIZER_MERGES_PATH,
-    LANGUAGE
+    LANGUAGE, use_gqa, num_kv_heads
 )
 from src.model import GPT
 
@@ -64,32 +64,36 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, top_p
     print("\nModel Output: ", end="", flush=True)
     printed_len = 0
     
+    # --- KV Cache Prefill ---
+    # Process the entire prompt in one pass and cache the KV states
+    logits, kv_cache = model(x, position_offset=0)
+    
+    # Get the first token prediction from the last position of the prefill
+    next_logits = logits[:, -1, :]
+    position = prompt_len  # Next token's position in the sequence
+    
     for _ in range(max_new_tokens):
-
-        x_cond = x[:, -context_length:]
-        
-        logits = model(x_cond) 
-        logits = logits[:, -1, :] 
+        logits_for_sampling = next_logits
         
         # Apply repetition penalty
         if repetition_penalty != 1.0:
             for token_id in set(x[0].tolist()):
-                if logits[0, token_id] < 0:
-                    logits[0, token_id] *= repetition_penalty
+                if logits_for_sampling[0, token_id] < 0:
+                    logits_for_sampling[0, token_id] *= repetition_penalty
                 else:
-                    logits[0, token_id] /= repetition_penalty
+                    logits_for_sampling[0, token_id] /= repetition_penalty
         
         if temperature > 0.0:
-            logits = logits / temperature
+            logits_for_sampling = logits_for_sampling / temperature
             
             # 1. Top-k filtering
             if top_k is not None and top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
+                v, _ = torch.topk(logits_for_sampling, min(top_k, logits_for_sampling.size(-1)))
+                logits_for_sampling[logits_for_sampling < v[:, [-1]]] = -float('Inf')
                 
             # 2. Top-p (Nucleus) filtering
             if top_p is not None and top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+                sorted_logits, sorted_indices = torch.sort(logits_for_sampling, descending=True, dim=-1)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
                 
                 # Identify which tokens exceed top_p cumulative threshold
@@ -99,20 +103,26 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, top_p
                 sorted_indices_to_remove[..., 0] = False
                 
                 # Map mask back to original logits shape
-                indices_to_remove = torch.zeros_like(logits, dtype=torch.bool)
+                indices_to_remove = torch.zeros_like(logits_for_sampling, dtype=torch.bool)
                 indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
-                logits[indices_to_remove] = -float('Inf')
+                logits_for_sampling[indices_to_remove] = -float('Inf')
                 
-            probs = F.softmax(logits, dim=-1)
+            probs = F.softmax(logits_for_sampling, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
         else:
-            next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            next_token = torch.argmax(logits_for_sampling, dim=-1, keepdim=True)
             
         eos_id = tokenizer.tokenizer.token_to_id.get("</s>", 2) if hasattr(tokenizer, "tokenizer") else 2
         if next_token.item() == eos_id:
             break
             
         x = torch.cat((x, next_token), dim=1)
+        
+        # --- KV Cache Decode Step ---
+        # Only process the new token, reusing cached KV states from all previous tokens
+        next_logits_out, kv_cache = model(next_token, kv_cache=kv_cache, position_offset=position)
+        next_logits = next_logits_out[:, -1, :]
+        position += 1
         
         generated_text = tokenizer.decode(x[0, prompt_len:].tolist())
         generated_text = devanagari_to_arabic(generated_text)
@@ -147,8 +157,10 @@ def main():
         context_length=context_length,
         num_layers=num_layers,
         num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
         d_model=d_model,
-        hidden_dim_ffn=hidden_dim_ffn
+        hidden_dim_ffn=hidden_dim_ffn,
+        use_gqa=use_gqa
     )
     
     # 3. Load Checkpoint
@@ -174,7 +186,7 @@ def main():
         else:
             new_state_dict[k] = v
             
-    model.load_state_dict(new_state_dict)
+    model.load_state_dict(new_state_dict, strict=False)
     model.to(device)
     print("Model loaded successfully!")
     

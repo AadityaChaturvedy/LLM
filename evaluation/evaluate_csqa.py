@@ -122,7 +122,7 @@ def evaluate_csqa(model, tokenizer, limit=None):
             x = torch.tensor([full_ids[:-1]], dtype=torch.long, device=DEVICE)
             y = torch.tensor([full_ids[1:]], dtype=torch.long, device=DEVICE)
             
-            logits = model(x)
+            logits, _ = model(x)
             
             start_idx = prompt_len_in_full - 1
             max_end = len(full_ids) - 1

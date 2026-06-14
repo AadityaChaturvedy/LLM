@@ -8,6 +8,7 @@ class FeedForwardNetwork(nn.Module):
     self.w_up = nn.Linear(dim, hidden_dim, bias=False)
 
     self.w_down = nn.Linear(hidden_dim, dim, bias=False)
+    self.w_down.is_residual_projection = True
 
   def forward(self, x):
     gate = F.silu(self.w_gate(x))

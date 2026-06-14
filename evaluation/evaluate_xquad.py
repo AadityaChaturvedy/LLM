@@ -80,7 +80,7 @@ def evaluate_xquad(model, tokenizer, limit=None):
         
         with torch.autocast(device_type=DEVICE if DEVICE == 'cuda' else 'cpu', dtype=autocast_dtype):
             for _ in range(64):
-                logits = model(x)
+                logits, _ = model(x)
                 next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
                 
                 if next_token.item() == eos_id:

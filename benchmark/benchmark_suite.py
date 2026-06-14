@@ -120,7 +120,7 @@ def benchmark_perplexity(model, tokenizer):
             x = torch.tensor([chunk_ids[:-1]], dtype=torch.long, device=DEVICE)
             y = torch.tensor([chunk_ids[1:]], dtype=torch.long, device=DEVICE)
 
-            logits = model(x)
+            logits, _ = model(x)
             B, T, C = logits.shape
             
             # If sliding window overlaps, we typically only score the non-overlapping part 
@@ -201,7 +201,7 @@ def benchmark_xquad(model, tokenizer):
         
         generated_ids = []
         for _ in range(20):
-            logits = model(x)
+            logits, _ = model(x)
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             token_str = tokenizer.decode([next_token.item()])
             if '\n' in token_str or '</s>' in token_str:
@@ -262,7 +262,7 @@ def benchmark_reasoning(model, tokenizer):
     
     generated_ids = []
     for _ in range(10):
-        logits = model(x)
+        logits, _ = model(x)
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         token_str = tokenizer.decode([next_token.item()])
         if '\n' in token_str or '</s>' in token_str:
@@ -334,7 +334,7 @@ def benchmark_latency(model, tokenizer):
     ids = enc.ids if hasattr(enc, 'ids') else enc
     x_warmup = torch.tensor([ids], dtype=torch.long, device=DEVICE)
     for _ in range(10):
-        logits = model(x_warmup[:, -context_length:])
+        logits, _ = model(x_warmup[:, -context_length:])
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         x_warmup = torch.cat((x_warmup, next_token), dim=1)
     if "cuda" in DEVICE:
@@ -353,7 +353,7 @@ def benchmark_latency(model, tokenizer):
     
     for _ in range(target_tokens):
         x_cond = x[:, -context_length:]
-        logits = model(x_cond)
+        logits, _ = model(x_cond)
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         x = torch.cat((x, next_token), dim=1)
         generated += 1
@@ -417,7 +417,7 @@ def benchmark_mmlu(model, tokenizer):
             y = torch.tensor([full_ids[1:]], dtype=torch.long, device=DEVICE)
             
             # Calculate logits
-            logits = model(x)
+            logits, _ = model(x)
             
             # We only calculate the loss for the option tokens
             start_idx = len(prompt_ids) - 1

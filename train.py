@@ -11,6 +11,7 @@ import torch
 from torch import nn, optim
 import torch.nn.functional as F
 import torch.distributed as dist
+from contextlib import nullcontext
 
 from src.dataset import FineWebDataset, BilingualHindiDataset
 from src.tokenizer_utils import Tokenizer
@@ -19,7 +20,7 @@ from src.encoder import Encoder
 from src.config import (
     TRAIN_TOKENIZER, TRAIN_LLM,
     eval_every, eval_steps, save_every, max_grad_norm,
-    train_loop,
+    train_loop, patience, min_delta,
     vocab_size, embedding_dim, LLM_ROWS, TOKENIZER_ROWS,
     context_length, batch_size_encoder, 
     num_heads, d_model,
@@ -27,14 +28,15 @@ from src.config import (
     TOKENIZED_DATA_PATH, TOKENIZER_MERGES_PATH, TOKENIZER_VOCAB_PATH,
     num_layers,
     accumulation_steps,
-    LANGUAGE
+    LANGUAGE,
+    use_gqa, num_kv_heads
 )
 
-from src.encoder import get_batch, load_tokenized_data
+from src.encoder import get_batch, load_tokenized_data, TokenPrefetcher
 from src.model import GPT
 
 def main():
-    # 1. Initialize DDP if environment variables are set
+    # 1. Initialize process group (DDP or single-process)
     ddp = int(os.environ.get("RANK", -1)) != -1
     if ddp:
         ddp_rank = int(os.environ["RANK"])
@@ -57,6 +59,17 @@ def main():
         ddp_world_size = 1
         is_master_process = True
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Initialize single-process group to support Muon or other distributed utilities
+        import datetime
+        backend = "nccl" if "cuda" in str(device) else "gloo"
+        dist.init_process_group(
+            backend=backend,
+            init_method="tcp://127.0.0.1:0",
+            rank=0,
+            world_size=1,
+            timeout=datetime.timedelta(hours=2)
+        )
 
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("log", exist_ok=True)
@@ -69,8 +82,10 @@ def main():
             with open(log_path, "a", encoding="utf-8") as log_file:
                 log_file.write(message + "\n")
 
+    import numpy as np
     seed = 1337
     random.seed(seed + ddp_rank)
+    np.random.seed(seed + ddp_rank)
     torch.manual_seed(seed + ddp_rank)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed + ddp_rank)
@@ -129,19 +144,41 @@ def main():
 
     if not TRAIN_LLM:
         log_line("TRAIN_LLM is set to False in config. Exiting.")
-        if ddp:
+        if dist.is_initialized():
             dist.destroy_process_group()
         return
 
     # Instantiate GPT Model
+    import json
+    if os.path.exists(TOKENIZER_VOCAB_PATH):
+        with open(TOKENIZER_VOCAB_PATH, "r", encoding="utf-8") as f:
+            model_vocab_size = len(json.load(f))
+    else:
+        model_vocab_size = vocab_size
+
+    model_config = {
+        "vocab_size": model_vocab_size,
+        "embedding_dim": embedding_dim,
+        "context_length": context_length,
+        "num_layers": num_layers,
+        "num_heads": num_heads,
+        "num_kv_heads": num_kv_heads,
+        "d_model": d_model,
+        "hidden_dim_ffn": hidden_dim_ffn,
+        "use_gqa": use_gqa,
+        "language": LANGUAGE,
+    }
+
     model = GPT(
-        vocab_size=vocab_size,
+        vocab_size=model_vocab_size,
         embedding_dim=embedding_dim,
         context_length=context_length,
         num_layers=num_layers,
         num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
         d_model=d_model,
-        hidden_dim_ffn=hidden_dim_ffn
+        hidden_dim_ffn=hidden_dim_ffn,
+        use_gqa=use_gqa
     )
     if "cuda" in str(device) and amp_dtype == torch.bfloat16:
         model.to(device, dtype=torch.bfloat16)
@@ -170,7 +207,7 @@ def main():
 
     resume_path = get_latest_checkpoint("checkpoints")
     if resume_path:
-        checkpoint = torch.load(resume_path, map_location=device)
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=True)
         
         state_dict = checkpoint["model"]
         clean_state_dict = {}
@@ -184,7 +221,7 @@ def main():
 
     if start_step >= train_loop:
         log_line(f"Checkpoint step {start_step} is >= train_loop {train_loop}; nothing to train.")
-        if ddp:
+        if dist.is_initialized():
             dist.destroy_process_group()
         raise SystemExit(0)
 
@@ -210,10 +247,30 @@ def main():
     param_count = sum(p.numel() for p in all_parameters)
     log_line(f"Total parameters (tied lm_head): {param_count:,}")
 
-    # Use 8-bit AdamW on CUDA device to reduce VRAM overhead and run purely on GPU
     if "cuda" in str(device):
-        import bitsandbytes as bnb
-        optimizer = bnb.optim.AdamW8bit(all_parameters, lr=3e-4)
+        try:
+            from muon import MuonWithAuxAdam
+            muon_params = []
+            adamw_params = []
+            for name, param in model.named_parameters():
+                if param.ndim >= 2 and 'embed' not in name:
+                    muon_params.append(param)
+                else:
+                    adamw_params.append(param)
+                    
+            param_groups = [
+                dict(params=muon_params, use_muon=True, lr=0.02, momentum=0.95, weight_decay=0.01),
+                dict(params=adamw_params, use_muon=False, lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1)
+            ]
+            optimizer = MuonWithAuxAdam(param_groups)
+            
+            # Muon is incompatible with GradScaler; force bf16 path
+            if scaler is not None:
+                scaler = None
+                log_line("WARNING: GradScaler disabled — Muon requires bfloat16, not float16.")
+        except ImportError:
+            log_line("Muon not installed; falling back to AdamW.")
+            optimizer = optim.AdamW(all_parameters, lr=3e-4, betas=(0.9, 0.95), weight_decay=0.1)
     else:
         optimizer = optim.AdamW(all_parameters, lr=3e-4)
     
@@ -221,43 +278,56 @@ def main():
         optimizer.load_state_dict(checkpoint["optimizer"])
 
     warmup_steps = min(2000, max(100, train_loop // 100))
+    stable_end = int(0.8 * train_loop)  # WSD: stable phase ends at 80%
     def lr_lambda(current_step):
+        # Warmup-Stable-Decay (WSD) Schedule
+        # Phase 1: Linear warmup
         if current_step < warmup_steps:
             return float(current_step + 1) / float(warmup_steps)
-        progress = (current_step - warmup_steps) / max(1, train_loop - warmup_steps)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+        # Phase 2: Stable — hold at max LR
+        elif current_step < stable_end:
+            return 1.0
+        # Phase 3: Cosine decay in the final 20%
+        else:
+            progress = (current_step - stable_end) / max(1, train_loop - stable_end)
+            return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     if resume_path:
         scheduler.load_state_dict(checkpoint["scheduler"])
 
-    def estimate_loss(data):
+    def estimate_loss():
         model.eval()
         losses = []
         with torch.no_grad():
             for _ in range(eval_steps):
-                xb, yb = get_batch(data, batch_size_encoder, context_length)
+                xb, yb = next(eval_prefetcher)
                 xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
+                
                 with torch.amp.autocast(device_type="cuda" if "cuda" in str(device) else "cpu", dtype=amp_dtype):
-                    logits = model(xb)
+                    logits, _ = model(xb)
                     B, T, C = logits.shape
-                    loss = F.cross_entropy(logits.view(B * T, C).float(), yb.view(B * T))
+                    loss = F.cross_entropy(logits.view(B * T, C), yb.view(B * T))
                 losses.append(loss.item())
         model.train()
         return sum(losses) / len(losses)
+
+    best_val_loss = float("inf")
+    patience_counter = 0
 
     model.train()
 
     effective_batch_size = batch_size_encoder * accumulation_steps * ddp_world_size
     tokens_per_step = effective_batch_size * context_length
-    steps_per_epoch = len(tokens_train) / tokens_per_step
+    steps_per_epoch = max(1, len(tokens_train) // tokens_per_step)
+
+    train_prefetcher = TokenPrefetcher(tokens_train, batch_size_encoder, context_length)
+    eval_prefetcher = TokenPrefetcher(tokens_val, batch_size_encoder, context_length)
 
     try:
         for step in range(start_step, train_loop):
-            if "cuda" in str(device):
-                torch.cuda.synchronize()
             step_start = time.time()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             accumulated_loss = 0.0
             for micro_step in range(accumulation_steps):
@@ -268,11 +338,10 @@ def main():
                 if ddp and not is_last_micro_step:
                     ctx = model.no_sync()
                 else:
-                    from contextlib import nullcontext
                     ctx = nullcontext()
 
                 with ctx:
-                    xb, yb = get_batch(tokens_train, batch_size_encoder, context_length)
+                    xb, yb = next(train_prefetcher)
                     xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
 
                     with torch.amp.autocast(device_type="cuda" if "cuda" in str(device) else "cpu", dtype=amp_dtype):
@@ -280,7 +349,7 @@ def main():
                         B, T, C = logits.shape
                         logits_flat = logits.view(B * T, C)
                         targets_flat = yb.view(B * T)
-                        loss = F.cross_entropy(logits_flat.float(), targets_flat) / accumulation_steps
+                        loss = F.cross_entropy(logits_flat, targets_flat) / accumulation_steps
 
                     if scaler is not None:
                         scaler.scale(loss).backward()
@@ -306,7 +375,7 @@ def main():
 
             scheduler.step()
 
-            if "cuda" in str(device):
+            if "cuda" in str(device) and (step + 1) % eval_every == 0:
                 torch.cuda.synchronize()
             step_time = time.time() - step_start
             tokens_per_sec = tokens_per_step / max(step_time, 1e-8)
@@ -332,13 +401,50 @@ def main():
                     )
 
             if (step + 1) % eval_every == 0:
-                val_loss = estimate_loss(tokens_val)
+                val_loss = estimate_loss()
                 # Average val loss across GPUs
                 if ddp:
                     val_loss_tensor = torch.tensor(val_loss, device=device)
                     dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
                     val_loss = val_loss_tensor.item()
                 log_line(f"\nEval @ step {step + 1} | Val loss: {val_loss:.4f}")
+
+                should_stop = 0
+                if is_master_process:
+                    if val_loss < best_val_loss - min_delta:
+                        best_val_loss = val_loss
+                        patience_counter = 0
+                        # Save best model separately
+                        raw_model = model.module if hasattr(model, "module") else model
+                        if hasattr(raw_model, "_orig_mod"):
+                            raw_model = raw_model._orig_mod
+                        torch.save({
+                            "step": step + 1,
+                            "optimizer": optimizer.state_dict(),
+                            "scheduler": scheduler.state_dict(),
+                            "model": raw_model.state_dict(),
+                            "val_loss": best_val_loss,
+                            "model_config": model_config,
+                        }, "checkpoints/best_model.pt")
+                        log_line(f"New best val loss: {best_val_loss:.4f} — saved best_model.pt")
+                    else:
+                        patience_counter += 1
+                        log_line(f"No improvement. Patience: {patience_counter}/{patience}")
+                        if patience_counter >= patience:
+                            should_stop = 1
+
+                if ddp:
+                    should_stop_tensor = torch.tensor(should_stop, device=device)
+                    dist.broadcast(should_stop_tensor, src=0)
+                    should_stop = should_stop_tensor.item()
+
+                if should_stop:
+                    log_line(f"Early stopping triggered at step {step + 1}")
+                    train_prefetcher.stop()
+                    eval_prefetcher.stop()
+                    if dist.is_initialized():
+                        dist.destroy_process_group()
+                    raise SystemExit(0)
 
             if is_master_process and (step + 1) % save_every == 0:
                 raw_model = model.module if hasattr(model, "module") else model
@@ -349,9 +455,25 @@ def main():
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "model": raw_model.state_dict(),
+                    "model_config": model_config,
                 }
                 torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
-                
+
+        # Save final model checkpoint upon successful completion of training loop
+        if is_master_process and train_loop % save_every != 0:
+            log_line(f"\nTraining completed successfully. Saving final checkpoint at step {train_loop}...")
+            raw_model = model.module if hasattr(model, "module") else model
+            if hasattr(raw_model, "_orig_mod"):
+                raw_model = raw_model._orig_mod
+            checkpoint = {
+                "step": train_loop,
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "model": raw_model.state_dict(),
+                "model_config": model_config,
+            }
+            torch.save(checkpoint, f"checkpoints/ckpt_step_{train_loop}.pt")
+            
     except KeyboardInterrupt:
         if is_master_process:
             log_line(f"\nTraining interrupted by user. Saving emergency checkpoint at step {step + 1}...")
@@ -363,13 +485,18 @@ def main():
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
                 "model": raw_model.state_dict(),
+                "model_config": model_config,
             }
             torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
-        if ddp:
+        if dist.is_initialized():
             dist.destroy_process_group()
+        train_prefetcher.stop()
+        eval_prefetcher.stop()
         raise SystemExit(0)
 
-    if ddp:
+    train_prefetcher.stop()
+    eval_prefetcher.stop()
+    if dist.is_initialized():
         dist.destroy_process_group()
 
 if __name__ == "__main__":

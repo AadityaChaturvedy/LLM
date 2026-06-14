@@ -50,12 +50,13 @@ class RotaryEmbedding(nn.Module):
         )
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads, d_model):
+    def __init__(self, num_heads, d_model, window_size=None):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_k = d_model // num_heads
         assert self.d_k % 2 == 0, "d_k must be even for Rotary Embeddings"
         self.num_heads = num_heads
+        self.window_size = window_size  # None = global attention, int = local sliding window
 
         self.wq = nn.Linear(d_model, d_model, bias=False)
         self.wk = nn.Linear(d_model, d_model, bias=False)
@@ -64,7 +65,20 @@ class MultiHeadAttention(nn.Module):
         
         self.rotary_emb = RotaryEmbedding(self.d_k)
 
-    def forward(self, x_norm, attn_mask=None):
+    def _make_sliding_window_mask(self, T, device, dtype):
+        """Create a causal sliding window attention mask."""
+        row_idx = torch.arange(T, device=device).unsqueeze(1)
+        col_idx = torch.arange(T, device=device).unsqueeze(0)
+        
+        causal_mask = col_idx > row_idx
+        window_mask = col_idx < (row_idx - self.window_size + 1)
+        mask = causal_mask | window_mask
+        
+        float_mask = torch.zeros(T, T, device=device, dtype=dtype)
+        float_mask.masked_fill_(mask, float('-inf'))
+        return float_mask
+
+    def forward(self, x_norm, attn_mask=None, kv_cache=None, position_offset=0):
         B, T, C = x_norm.shape
 
         # Linear projections
@@ -72,16 +86,41 @@ class MultiHeadAttention(nn.Module):
         K = self.wk(x_norm).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
         V = self.wv(x_norm).view(B, T, self.num_heads, self.d_k).transpose(1, 2)
 
-        # Apply RoPE
-        cos, sin = self.rotary_emb(Q, seq_len=T)
+        # Apply RoPE with position offset for cached inference
+        total_len = position_offset + T
+        cos, sin = self.rotary_emb(Q, seq_len=total_len)
+        cos = cos[position_offset:total_len]
+        sin = sin[position_offset:total_len]
         Q, K = apply_rotary_pos_emb(Q, K, cos, sin)
 
-        # Efficient scaled dot-product attention
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            Q, K, V,
-            attn_mask=attn_mask,
-            is_causal=True if attn_mask is None else False
-        )
+        # KV Cache for autoregressive inference
+        new_kv_cache = None
+        if kv_cache is not None:
+            past_k, past_v = kv_cache
+            K = torch.cat([past_k, K], dim=2)
+            V = torch.cat([past_v, V], dim=2)
+            new_kv_cache = (K, V)
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                Q, K, V,
+                attn_mask=None,
+                is_causal=False
+            )
+        else:
+            new_kv_cache = (K, V)
+            
+            if self.window_size is not None and self.training:
+                sw_mask = self._make_sliding_window_mask(T, x_norm.device, x_norm.dtype)
+                attn_output = torch.nn.functional.scaled_dot_product_attention(
+                    Q, K, V,
+                    attn_mask=sw_mask,
+                    is_causal=False
+                )
+            else:
+                attn_output = torch.nn.functional.scaled_dot_product_attention(
+                    Q, K, V,
+                    attn_mask=attn_mask,
+                    is_causal=True if attn_mask is None else False
+                )
 
         # Concatenate heads and pass through final linear layer
         attn_output = attn_output.transpose(1, 2).contiguous().view(
@@ -89,4 +128,4 @@ class MultiHeadAttention(nn.Module):
         )
 
         output = self.out_linear(attn_output)
-        return output
+        return output, new_kv_cache

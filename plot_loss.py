@@ -57,7 +57,7 @@ def main() -> None:
         description="Plot loss curves from two training log files."
     )
     parser.add_argument("log_a", help="Path to first log file")
-    parser.add_argument("log_b", help="Path to second log file")
+    parser.add_argument("log_b", nargs="?", default=None, help="Path to second log file (optional)")
     parser.add_argument("--label-a", default="Run A", help="Legend label for first log")
     parser.add_argument("--label-b", default="Run B", help="Legend label for second log")
     parser.add_argument(
@@ -81,30 +81,32 @@ def main() -> None:
     args = parser.parse_args()
 
     steps_a, losses_a = parse_log(args.log_a)
-    steps_b, losses_b = parse_log(args.log_b)
+    steps_b, losses_b = parse_log(args.log_b) if args.log_b else ([], [])
 
-    if not steps_a or not steps_b:
-        raise SystemExit("No loss values found in one or both log files.")
+    if not steps_a:
+        raise SystemExit("No loss values found in the first log file.")
 
     plt.figure(figsize=(10, 6))
     plt.plot(steps_a, losses_a, label=f"{args.label_a} (raw)", linewidth=1.4, alpha=0.6)
-    plt.plot(steps_b, losses_b, label=f"{args.label_b} (raw)", linewidth=1.4, alpha=0.6)
+    if steps_b:
+        plt.plot(steps_b, losses_b, label=f"{args.label_b} (raw)", linewidth=1.4, alpha=0.6)
 
     if args.smooth_window > 1:
         smooth_steps_a, smooth_losses_a = smooth_series(steps_a, losses_a, args.smooth_window)
-        smooth_steps_b, smooth_losses_b = smooth_series(steps_b, losses_b, args.smooth_window)
         plt.plot(
             smooth_steps_a,
             smooth_losses_a,
             label=f"{args.label_a} (smoothed)",
             linewidth=2.2,
         )
-        plt.plot(
-            smooth_steps_b,
-            smooth_losses_b,
-            label=f"{args.label_b} (smoothed)",
-            linewidth=2.2,
-        )
+        if steps_b:
+            smooth_steps_b, smooth_losses_b = smooth_series(steps_b, losses_b, args.smooth_window)
+            plt.plot(
+                smooth_steps_b,
+                smooth_losses_b,
+                label=f"{args.label_b} (smoothed)",
+                linewidth=2.2,
+            )
     plt.xlabel("Step")
     plt.ylabel("Loss")
     plt.title(args.title)

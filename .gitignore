@@ -26,8 +26,7 @@ checkpoints/
 all_checkpoints/
 
 # Plots and reports
-loss.png
-loss_delta.png
+*.png
 
 # Benchmark data
 hindi_XLSum_v2.0/
