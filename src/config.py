@@ -43,9 +43,9 @@ if LANGUAGE == "hindi":
     num_heads = 16
     num_kv_heads = 4
     hidden_dim_ffn = 3584
-    batch_size_encoder = 13
-    accumulation_steps = 16
-    context_length = 1024
+    batch_size_encoder = 26
+    accumulation_steps = 8
+    context_length = 512
 elif LANGUAGE == "hinglish":
     hindi_vocab_size = 100_000
     english_vocab_size = 28_000
