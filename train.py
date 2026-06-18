@@ -29,11 +29,14 @@ from src.config import (
     num_layers,
     accumulation_steps,
     LANGUAGE,
-    use_gqa, num_kv_heads
+    use_gqa, num_kv_heads,
+    MoE, moe_aux_loss_weight,
+    moe_aux_loss_warmup_steps, moe_log_every
 )
 
 from src.encoder import get_batch, load_tokenized_data, TokenPrefetcher
 from src.model import GPT
+import src.config as config
 
 def main():
     # 1. Initialize process group (DDP or single-process)
@@ -81,6 +84,39 @@ def main():
             print(message)
             with open(log_path, "a", encoding="utf-8") as log_file:
                 log_file.write(message + "\n")
+
+    def unwrap_model(wrapped_model):
+        raw_model = wrapped_model
+        if hasattr(raw_model, "_orig_mod"):
+            raw_model = raw_model._orig_mod
+        if hasattr(raw_model, "module"):
+            raw_model = raw_model.module
+        if hasattr(raw_model, "_orig_mod"):
+            raw_model = raw_model._orig_mod
+        return raw_model
+
+    def collect_moe_stats(wrapped_model, device):
+        raw_model = unwrap_model(wrapped_model)
+        stats = []
+        for block in getattr(raw_model, "blocks", []):
+            if not getattr(block, "use_moe", False):
+                continue
+            block_stats = getattr(block.ffn, "last_stats", {})
+            if block_stats:
+                kept = block_stats["kept_per_expert"].float()
+                stats.append(torch.stack([
+                    block_stats["drop_rate"].float(),
+                    block_stats["router_entropy"].float(),
+                    kept.min(),
+                    kept.max(),
+                    block_stats["capacity"].float(),
+                ]))
+        if not stats:
+            return None
+        stats_tensor = torch.stack(stats).mean(dim=0).to(device)
+        if ddp:
+            dist.all_reduce(stats_tensor, op=dist.ReduceOp.AVG)
+        return stats_tensor
 
     import numpy as np
     seed = 1337
@@ -166,6 +202,20 @@ def main():
         "d_model": d_model,
         "hidden_dim_ffn": hidden_dim_ffn,
         "use_gqa": use_gqa,
+        "MoE": MoE,
+        "moe_num_experts": config.moe_num_experts,
+        "moe_top_k": config.moe_top_k,
+        "moe_capacity_factor": config.moe_capacity_factor,
+        "moe_eval_capacity_factor": config.moe_eval_capacity_factor,
+        "moe_min_capacity": config.moe_min_capacity,
+        "moe_aux_loss_weight": moe_aux_loss_weight,
+        "moe_aux_loss_warmup_steps": moe_aux_loss_warmup_steps,
+        "moe_router_z_loss_weight": config.moe_router_z_loss_weight,
+        "moe_router_noise_std": config.moe_router_noise_std,
+        "moe_router_temperature": config.moe_router_temperature,
+        "moe_num_shared_experts": config.moe_num_shared_experts,
+        "moe_shared_expert_weight": config.moe_shared_expert_weight,
+        "moe_renormalize_after_drop": config.moe_renormalize_after_drop,
         "language": LANGUAGE,
     }
 
@@ -214,7 +264,12 @@ def main():
         for k, v in state_dict.items():
             name = k.replace("_orig_mod.", "").replace("module.", "")
             clean_state_dict[name] = v
-        model.load_state_dict(clean_state_dict)
+        missing_keys, unexpected_keys = model.load_state_dict(clean_state_dict, strict=not MoE)
+        if MoE and (missing_keys or unexpected_keys):
+            log_line(
+                f"Loaded checkpoint with MoE strict=False "
+                f"({len(missing_keys)} missing, {len(unexpected_keys)} unexpected keys)."
+            )
         
         start_step = checkpoint.get("step", 0)
         log_line(f"Resumed from {resume_path} at step {start_step}")
@@ -345,11 +400,18 @@ def main():
                     xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
 
                     with torch.amp.autocast(device_type="cuda" if "cuda" in str(device) else "cpu", dtype=amp_dtype):
-                        logits = model(xb)
+                        if MoE:
+                            logits, aux_loss = model(xb, return_aux_loss=True)
+                        else:
+                            logits = model(xb)
+                            aux_loss = logits.new_zeros(())
                         B, T, C = logits.shape
                         logits_flat = logits.view(B * T, C)
                         targets_flat = yb.view(B * T)
-                        loss = F.cross_entropy(logits_flat, targets_flat) / accumulation_steps
+                        lm_loss = F.cross_entropy(logits_flat, targets_flat)
+                        aux_warmup = min(1.0, (step + 1) / max(1, moe_aux_loss_warmup_steps))
+                        aux_weight = moe_aux_loss_weight * aux_warmup
+                        loss = (lm_loss + aux_weight * aux_loss) / accumulation_steps
 
                     if scaler is not None:
                         scaler.scale(loss).backward()
@@ -398,6 +460,19 @@ def main():
                 with open(log_path, "a", encoding="utf-8") as log_file:
                     log_file.write(
                         f"Step {step + 1} | Epoch {epoch_val:.2f} | Loss: {accumulated_loss:.4f} | Tokens/sec: {tokens_per_sec:,.0f}\n"
+                    )
+
+            if MoE and (step + 1) % moe_log_every == 0:
+                moe_stats = collect_moe_stats(model, device)
+                if is_master_process and moe_stats is not None:
+                    drop_rate, router_entropy, expert_min, expert_max, capacity = moe_stats.tolist()
+                    log_line(
+                        f"\nMoE @ step {step + 1} | "
+                        f"aux_weight: {aux_weight:.5f} | "
+                        f"drop_rate: {drop_rate:.4f} | "
+                        f"router_entropy: {router_entropy:.4f} | "
+                        f"expert_kept_min/max: {expert_min:.1f}/{expert_max:.1f} | "
+                        f"capacity: {capacity:.1f}"
                     )
 
             if (step + 1) % eval_every == 0:

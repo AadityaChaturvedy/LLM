@@ -16,7 +16,7 @@ from src.custom_tokenizer import CustomTokenizer
 from src.config import (
     vocab_size, embedding_dim, context_length,
     num_layers, num_heads, d_model, hidden_dim_ffn,
-    LANGUAGE
+    LANGUAGE, MoE, moe_aux_loss_weight, moe_aux_loss_warmup_steps
 )
 from src.model import GPT
 
@@ -243,12 +243,19 @@ def main():
 
             with ctx:
                 with torch.amp.autocast(device_type="cuda" if "cuda" in device else "cpu", dtype=amp_dtype):
-                    logits = model(xb)
+                    if MoE:
+                        logits, aux_loss = model(xb, return_aux_loss=True)
+                    else:
+                        logits = model(xb)
+                        aux_loss = logits.new_zeros(())
                     B, T, C = logits.shape
                     # Explicit ignore_index=-100 is safer.
                     # Note on DDP: With DDP + no_sync(), loss from different micro-steps isn't synchronized
                     # until the last step. Effective loss scale can drift between ranks if batch sizes are uneven at tail.
-                    loss = F.cross_entropy(logits.view(B*T, C), yb.view(B*T), ignore_index=-100) / ACCUMULATION_STEPS
+                    lm_loss = F.cross_entropy(logits.view(B*T, C), yb.view(B*T), ignore_index=-100)
+                    aux_warmup = min(1.0, (global_step + 1) / max(1, moe_aux_loss_warmup_steps))
+                    aux_weight = moe_aux_loss_weight * aux_warmup
+                    loss = (lm_loss + aux_weight * aux_loss) / ACCUMULATION_STEPS
                 accum_loss += loss.item()
                 
                 if scaler is not None:

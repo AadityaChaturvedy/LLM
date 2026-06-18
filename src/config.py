@@ -34,6 +34,24 @@ english_vocab_size = 0
 # Model Dimensions (based on LANGUAGE mode)
 use_gqa = True
 
+# Mixture-of-Experts FFN
+# Set MoE = False to use the standard dense FeedForwardNetwork.
+MoE = False
+moe_num_experts = 8
+moe_top_k = 2
+moe_capacity_factor = 1.25
+moe_eval_capacity_factor = 2.0
+moe_min_capacity = 4
+moe_aux_loss_weight = 0.01
+moe_aux_loss_warmup_steps = 1000
+moe_router_z_loss_weight = 0.001
+moe_router_noise_std = 0.1
+moe_router_temperature = 1.0
+moe_num_shared_experts = 1
+moe_shared_expert_weight = 1.0
+moe_renormalize_after_drop = True
+moe_log_every = 100
+
 if LANGUAGE == "hindi":
     hindi_vocab_size = 64_000
     vocab_size = hindi_vocab_size
@@ -77,5 +95,4 @@ TOKENIZER_VOCAB_PATH = os.path.join(TOKENIZER_DIR, "model-vocab.json")
 TOKENIZER_MERGES_PATH = os.path.join(TOKENIZER_DIR, "model-merges.txt")
 TOKENIZER_JSON_PATH = os.path.join(TOKENIZER_DIR, "tokenizer.json")
 TOKENIZED_DATA_PATH = os.path.join(TOKENIZER_DIR, "tokens.npy")
-CHECKPOINT_PATH = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
-
+CHECKPOINT_PATH = "checkpoints/ckpt_step_17500.pt"
