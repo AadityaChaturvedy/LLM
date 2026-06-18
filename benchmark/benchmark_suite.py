@@ -19,13 +19,13 @@ from src.custom_tokenizer import CustomTokenizer
 from src.config import (
     vocab_size, embedding_dim, context_length,
     num_layers, num_heads, d_model, hidden_dim_ffn,
-    TOKENIZER_VOCAB_PATH, LANGUAGE
+    TOKENIZER_VOCAB_PATH, LANGUAGE, CHECKPOINT_PATH as CONFIG_CHECKPOINT_PATH
 )
 from src.model import GPT
 
 # --- Configuration ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-CHECKPOINT_PATH = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
+CHECKPOINT_PATH = CONFIG_CHECKPOINT_PATH
 NUM_PPL_SAMPLES = 100
 NUM_XQUAD_SAMPLES = 50
 LLAMA_TOKENIZER = "meta-llama/Meta-Llama-3-8B"

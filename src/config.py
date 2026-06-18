@@ -77,3 +77,5 @@ TOKENIZER_VOCAB_PATH = os.path.join(TOKENIZER_DIR, "model-vocab.json")
 TOKENIZER_MERGES_PATH = os.path.join(TOKENIZER_DIR, "model-merges.txt")
 TOKENIZER_JSON_PATH = os.path.join(TOKENIZER_DIR, "tokenizer.json")
 TOKENIZED_DATA_PATH = os.path.join(TOKENIZER_DIR, "tokens.npy")
+CHECKPOINT_PATH = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
+

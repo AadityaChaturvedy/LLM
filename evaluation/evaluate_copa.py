@@ -1,15 +1,19 @@
+import sys
 import os
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
 import argparse
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
 from tqdm import tqdm
 
-from src.config import context_length
+from src.config import context_length, CHECKPOINT_PATH
 from src.eval_utils import load_model_and_tokenizer, arabic_to_devanagari
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-CHECKPOINT_PATH = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
 
 @torch.no_grad()
 def evaluate_copa(model, tokenizer, limit=None):

@@ -429,22 +429,8 @@ def main():
                         log_line(f"New best val loss: {best_val_loss:.4f} — saved best_model.pt")
                     else:
                         patience_counter += 1
-                        log_line(f"No improvement. Patience: {patience_counter}/{patience}")
-                        if patience_counter >= patience:
-                            should_stop = 1
+                        log_line(f"No improvement. Patience: {patience_counter}/{patience} (Continuing training)")
 
-                if ddp:
-                    should_stop_tensor = torch.tensor(should_stop, device=device)
-                    dist.broadcast(should_stop_tensor, src=0)
-                    should_stop = should_stop_tensor.item()
-
-                if should_stop:
-                    log_line(f"Early stopping triggered at step {step + 1}")
-                    train_prefetcher.stop()
-                    eval_prefetcher.stop()
-                    if dist.is_initialized():
-                        dist.destroy_process_group()
-                    raise SystemExit(0)
 
             if is_master_process and (step + 1) % save_every == 0:
                 raw_model = model.module if hasattr(model, "module") else model
@@ -460,8 +446,8 @@ def main():
                 torch.save(checkpoint, f"checkpoints/ckpt_step_{step + 1}.pt")
 
         # Save final model checkpoint upon successful completion of training loop
-        if is_master_process and train_loop % save_every != 0:
-            log_line(f"\nTraining completed successfully. Saving final checkpoint at step {train_loop}...")
+        if is_master_process:
+            log_line(f"\nTraining completed successfully. Saving final model at checkpoints/final_model.pt...")
             raw_model = model.module if hasattr(model, "module") else model
             if hasattr(raw_model, "_orig_mod"):
                 raw_model = raw_model._orig_mod
@@ -472,7 +458,9 @@ def main():
                 "model": raw_model.state_dict(),
                 "model_config": model_config,
             }
-            torch.save(checkpoint, f"checkpoints/ckpt_step_{train_loop}.pt")
+            torch.save(checkpoint, "checkpoints/final_model.pt")
+            if train_loop % save_every != 0:
+                torch.save(checkpoint, f"checkpoints/ckpt_step_{train_loop}.pt")
             
     except KeyboardInterrupt:
         if is_master_process:

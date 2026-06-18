@@ -4,11 +4,12 @@ import torch
 from src.custom_tokenizer import CustomTokenizer
 from src.config import (
     vocab_size, embedding_dim, context_length,
-    num_layers, num_heads, d_model, hidden_dim_ffn, LANGUAGE
+    num_layers, num_heads, d_model, hidden_dim_ffn, LANGUAGE,
+    CHECKPOINT_PATH
 )
 from src.model import GPT
 
-def load_model_and_tokenizer(device, checkpoint_path="sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"):
+def load_model_and_tokenizer(device, checkpoint_path=CHECKPOINT_PATH):
     print(f"Using device: {device}")
     if LANGUAGE in ["hindi", "hinglish"]:
         tokenizer = CustomTokenizer()

@@ -1,0 +1,21 @@
+datasets:
+  - sample
+  - hinglish
+
+tokenizers:
+  - custom
+  - tiktoken
+  # Uncomment when dependencies/network/access are available.
+  # - muril
+  # - sarvam
+  # - krutrim
+  # - llama
+  # - qwen
+  # - mistral
+  # - gemma
+
+limit: 1000
+output_dir: tokenizer_benchmark/results
+
+extra_hf_tokenizers: {}
+sentencepiece_tokenizers: {}

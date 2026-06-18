@@ -1,4 +1,9 @@
+import sys
 import os
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
 import argparse
 import torch
 import torch.nn.functional as F
@@ -8,12 +13,12 @@ from tqdm import tqdm
 from src.custom_tokenizer import CustomTokenizer
 from src.config import (
     vocab_size, embedding_dim, context_length,
-    num_layers, num_heads, d_model, hidden_dim_ffn, LANGUAGE
+    num_layers, num_heads, d_model, hidden_dim_ffn, LANGUAGE,
+    CHECKPOINT_PATH
 )
 from src.model import GPT
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-CHECKPOINT_PATH = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
 
 def load_model_and_tokenizer():
     print(f"Using device: {DEVICE}")
