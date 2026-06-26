@@ -45,31 +45,48 @@ class TokenPrefetcher:
         self.q = queue.Queue(maxsize=q_size)
         self.stop_event = threading.Event()
         self.workers = []
+        self.exception_queue = queue.Queue()
         for _ in range(num_workers):
             t = threading.Thread(target=self._worker, daemon=True)
             t.start()
             self.workers.append(t)
 
     def _worker(self):
-        while not self.stop_event.is_set():
-            xb, yb = get_batch(self.data, self.batch_size, self.context_length)
-            # Pin memory for faster host-to-device transfer
-            xb = xb.pin_memory()
-            yb = yb.pin_memory()
-            try:
-                # Wait for up to 1s to allow checking stop_event periodically
-                self.q.put((xb, yb), timeout=1)
-            except queue.Full:
-                continue
+        try:
+            while not self.stop_event.is_set():
+                xb, yb = get_batch(self.data, self.batch_size, self.context_length)
+                # Pin memory for faster host-to-device transfer
+                xb = xb.pin_memory()
+                yb = yb.pin_memory()
+                try:
+                    # Wait for up to 1s to allow checking stop_event periodically
+                    self.q.put((xb, yb), timeout=1)
+                except queue.Full:
+                    continue
+        except Exception as e:
+            import traceback
+            self.exception_queue.put((e, traceback.format_exc()))
+            self.stop_event.set()
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        while not self.stop_event.is_set():
+        import sys
+        while not self.stop_event.is_set() or not self.q.empty():
+            if not self.exception_queue.empty():
+                e, tb = self.exception_queue.get()
+                print(f"Error in TokenPrefetcher worker thread:\n{tb}", file=sys.stderr)
+                raise e
             try:
-                return self.q.get(timeout=1)
+                return self.q.get(timeout=0.1)
             except queue.Empty:
+                if all(not w.is_alive() for w in self.workers) and self.q.empty():
+                    if not self.exception_queue.empty():
+                        e, tb = self.exception_queue.get()
+                        print(f"Error in TokenPrefetcher worker thread:\n{tb}", file=sys.stderr)
+                        raise e
+                    raise RuntimeError("All TokenPrefetcher worker threads died unexpectedly.")
                 continue
         raise StopIteration
 

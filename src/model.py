@@ -2,20 +2,16 @@ import math
 import torch
 import torch.nn as nn
 
-from src.embedding import Embedding
 from src.rmsNorm import RMSNorm
 from src.multiHeadAttention import MultiHeadAttention
 from src.groupedQueryAttention import GroupedQueryAttention
 from src.feedForwardNetwork import FeedForwardNetwork
 from src.mixtureOfExperts import MixtureOfExperts
 import src.config as config
+from src.config import ACTIVATION_CHECKPOINTING, WINDOW_SIZE, GLOBAL_ATTENTION_INTERVAL
 
 from torch.utils.checkpoint import checkpoint
 
-# Sliding window config: every GLOBAL_ATTENTION_INTERVAL-th layer uses full
-# global attention; all other layers use a local sliding window.
-GLOBAL_ATTENTION_INTERVAL = 4
-DEFAULT_WINDOW_SIZE = 512
 
 class Block(nn.Module):
     def __init__(self, num_heads, d_model, hidden_dim_ffn, num_kv_heads=None, use_gqa=None, window_size=None):
@@ -64,11 +60,12 @@ class Block(nn.Module):
         x2 = x1 + h2
         return x2, new_kv_cache, aux_loss
 
+
 class GPT(nn.Module):
     def __init__(self, vocab_size, embedding_dim, context_length, num_layers, num_heads, d_model, hidden_dim_ffn, num_kv_heads=None, use_gqa=None):
         super().__init__()
         self.num_layers = num_layers  # Store layer count for initialization scaling
-        self.embedding = Embedding(vocab_size, embedding_dim, context_length)
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
         
         # Build blocks with interleaved sliding window / global attention
         # Every GLOBAL_ATTENTION_INTERVAL-th layer (4th, 8th, 12th...) gets global attention.
@@ -77,7 +74,7 @@ class GPT(nn.Module):
         for i in range(num_layers):
             # Layer indices are 0-based; every 4th layer (index 3, 7, 11...) is global
             is_global = ((i + 1) % GLOBAL_ATTENTION_INTERVAL == 0)
-            ws = None if is_global else DEFAULT_WINDOW_SIZE
+            ws = None if is_global else WINDOW_SIZE
             self.blocks.append(
                 Block(num_heads, d_model, hidden_dim_ffn, num_kv_heads, use_gqa, window_size=ws)
             )
@@ -89,7 +86,7 @@ class GPT(nn.Module):
         self.apply(self._init_weights)
 
         # Tie weights between embedding and final linear projection head
-        self.lm_head.weight = self.embedding.token_embedding.weight
+        self.lm_head.weight = self.embedding.weight
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -103,6 +100,13 @@ class GPT(nn.Module):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def load_state_dict(self, state_dict, strict=True):
+        if "embedding.token_embedding.weight" in state_dict:
+            state_dict = dict(state_dict)
+            state_dict["embedding.weight"] = state_dict.pop("embedding.token_embedding.weight")
+        return super().load_state_dict(state_dict, strict=strict)
+
 
     def forward(self, xb, attn_mask=None, kv_cache=None, position_offset=0, return_aux_loss=False):
         """
@@ -131,12 +135,16 @@ class GPT(nn.Module):
             layer_cache = kv_cache[i] if use_cache else None
             
             if self.training:
-                # Activation checkpointing during training — no KV cache needed
-                # checkpoint doesn't support extra return values well, so we wrap it
-                x, block_aux_loss = checkpoint(
-                    self._block_forward_no_cache, block, x, attn_mask,
-                    use_reentrant=False
-                )
+                if ACTIVATION_CHECKPOINTING:
+                    # Activation checkpointing during training — no KV cache needed
+                    # checkpoint doesn't support extra return values well, so we wrap it
+                    x, block_aux_loss = checkpoint(
+                       self._block_forward_no_cache, block, x, attn_mask,
+                        use_reentrant=False
+                    )
+                else:
+                    # Forward pass directly without activation checkpointing to avoid redundant compute
+                    x, _, block_aux_loss = block(x, attn_mask=attn_mask)
                 aux_loss = aux_loss + block_aux_loss
                 if getattr(block, "use_moe", False):
                     aux_loss_count += 1

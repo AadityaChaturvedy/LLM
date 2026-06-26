@@ -13,6 +13,9 @@ from contextlib import nullcontext
 from tqdm import tqdm
 
 import sys
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
 
 try:
     from peft import get_peft_model, LoraConfig, TaskType
@@ -24,15 +27,16 @@ from src.custom_tokenizer import CustomTokenizer
 from src.config import (
     vocab_size, embedding_dim, context_length,
     num_layers, num_heads, d_model, hidden_dim_ffn,
-    LANGUAGE
+    LANGUAGE, MoE, moe_aux_loss_weight, moe_aux_loss_warmup_steps,
+    CHECKPOINT_PATH
 )
 from src.model import GPT
 
 SFT_CHECKPOINT_DIR = "sft_checkpoints_lora"
-BASE_CHECKPOINT = "checkpoints/ckpt_step_120000.pt"
+BASE_CHECKPOINT = CHECKPOINT_PATH
 EPOCHS = 4
-BATCH_SIZE = 8
-ACCUMULATION_STEPS = 8 
+BATCH_SIZE = 2
+ACCUMULATION_STEPS = 32
 LR = 2e-4
 MAX_SAMPLES = 100 # Set to 100 for testing, change to 150000 for full run
 
@@ -211,7 +215,17 @@ def main():
         
     ckpt_vocab_size, ckpt_embedding_dim = new_state_dict["embedding.token_embedding.weight"].shape
     ckpt_d_model = new_state_dict["blocks.0.mha.wq.weight"].shape[1]
-    ckpt_hidden_ffn = new_state_dict["blocks.0.ffn.w_down.weight"].shape[1]
+    
+    # Infer hidden_dim_ffn dynamically, supporting both standard FFN and MoE FFN
+    if "blocks.0.ffn.w_down.weight" in new_state_dict:
+        ckpt_hidden_ffn = new_state_dict["blocks.0.ffn.w_down.weight"].shape[1]
+    else:
+        ffn_w_down_keys = [k for k in new_state_dict.keys() if k.startswith("blocks.0.ffn.") and k.endswith(".w_down.weight")]
+        if ffn_w_down_keys:
+            ckpt_hidden_ffn = new_state_dict[ffn_w_down_keys[0]].shape[1]
+        else:
+            raise KeyError("Could not find any FFN weight (like w_down.weight) in blocks.0 to determine hidden_dim_ffn.")
+            
     ckpt_num_layers = sum(1 for k in new_state_dict.keys() if k.endswith(".mha.wq.weight"))
     ckpt_num_heads = 16 
 
@@ -222,7 +236,8 @@ def main():
         wk_out_features = new_state_dict["blocks.0.mha.wk.weight"].shape[0]
         d_k = ckpt_d_model // ckpt_num_heads
         num_kv_heads = wk_out_features // d_k
-        use_gqa = num_kv_heads < ckpt_num_heads
+        # Force GQA if wk has fewer KV heads or if q_scale is present in the checkpoint
+        use_gqa = (num_kv_heads < ckpt_num_heads) or ("blocks.0.mha.q_scale" in new_state_dict)
 
     model = GPT(
         vocab_size=ckpt_vocab_size,
@@ -257,7 +272,10 @@ def main():
         model.print_trainable_parameters()
     
     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    model.to(device)
+    if "cuda" in device and amp_dtype == torch.bfloat16:
+        model.to(device, dtype=torch.bfloat16)
+    else:
+        model.to(device)
 
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
@@ -304,9 +322,16 @@ def main():
 
             with ctx:
                 with torch.amp.autocast(device_type="cuda" if "cuda" in device else "cpu", dtype=amp_dtype):
-                    logits = model(xb)
+                    if MoE:
+                        logits, aux_loss = model(xb, return_aux_loss=True)
+                    else:
+                        logits = model(xb)
+                        aux_loss = logits.new_zeros(())
                     B, T, C = logits.shape
-                    loss = F.cross_entropy(logits.view(B*T, C), yb.view(B*T)) / ACCUMULATION_STEPS
+                    lm_loss = F.cross_entropy(logits.view(B*T, C), yb.view(B*T), ignore_index=-100)
+                    aux_warmup = min(1.0, (global_step + 1) / max(1, moe_aux_loss_warmup_steps))
+                    aux_weight = moe_aux_loss_weight * aux_warmup
+                    loss = (lm_loss + aux_weight * aux_loss) / ACCUMULATION_STEPS
                 
                 if scaler is not None:
                     scaler.scale(loss).backward()

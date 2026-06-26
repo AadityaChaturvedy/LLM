@@ -15,13 +15,12 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
-from src.custom_tokenizer import CustomTokenizer
 from src.config import (
     vocab_size, embedding_dim, context_length,
     num_layers, num_heads, d_model, hidden_dim_ffn,
     TOKENIZER_VOCAB_PATH, LANGUAGE, CHECKPOINT_PATH as CONFIG_CHECKPOINT_PATH
 )
-from src.model import GPT
+from src.eval_utils import load_model_and_tokenizer, arabic_to_devanagari, devanagari_to_arabic
 
 # --- Configuration ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -30,62 +29,6 @@ NUM_PPL_SAMPLES = 100
 NUM_XQUAD_SAMPLES = 50
 LLAMA_TOKENIZER = "meta-llama/Meta-Llama-3-8B"
 
-def arabic_to_devanagari(text):
-    mapping = str.maketrans('0123456789', '०१२३४५६७८९')
-    return text.translate(mapping)
-
-def devanagari_to_arabic(text):
-    mapping = str.maketrans('०१२३४५६७८९', '0123456789')
-    return text.translate(mapping)
-
-def load_model_and_tokenizer():
-    print(f"Using device: {DEVICE}")
-    if LANGUAGE in ["hindi", "hinglish"]:
-        tokenizer = CustomTokenizer()
-        tokenizer.load()
-    else:
-        raise ValueError("This benchmark suite is designed for Hindi/Hinglish custom tokenizer.")
-
-    model = GPT(
-        vocab_size=vocab_size,
-        embedding_dim=embedding_dim,
-        context_length=context_length,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        d_model=d_model,
-        hidden_dim_ffn=hidden_dim_ffn
-    )
-
-    CHECKPOINT_ABS_PATH = os.path.join(BASE_DIR, CHECKPOINT_PATH)
-    if not os.path.exists(CHECKPOINT_ABS_PATH):
-        print(f"Checkpoint {CHECKPOINT_ABS_PATH} not found. Defaulting to latest.")
-        ckpt_dir = os.path.join(BASE_DIR, "checkpoints")
-        if not os.path.exists(ckpt_dir):
-            raise FileNotFoundError(f"Checkpoints directory not found at {ckpt_dir}")
-        available = sorted([f for f in os.listdir(ckpt_dir) if f.endswith(".pt")])
-        if not available:
-            raise FileNotFoundError("No checkpoints found.")
-        cp_path = os.path.join(ckpt_dir, available[-1])
-    else:
-        cp_path = CHECKPOINT_ABS_PATH
-
-    print(f"Loading weights from {cp_path}...")
-    checkpoint = torch.load(cp_path, map_location=DEVICE, weights_only=True)
-    
-    state_dict = checkpoint["model"]
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith("_orig_mod."):
-            new_state_dict[k[len("_orig_mod.") :]] = v
-        elif k.startswith("module."):
-            new_state_dict[k[len("module.") :]] = v
-        else:
-            new_state_dict[k] = v
-            
-    model.load_state_dict(new_state_dict)
-    model.to(DEVICE)
-    model.eval()
-    return model, tokenizer
 
 @torch.no_grad()
 def benchmark_perplexity(model, tokenizer):
@@ -448,7 +391,7 @@ def benchmark_mmlu(model, tokenizer):
 
 def main():
     print("Initializing Benchmark Suite...")
-    model, tokenizer = load_model_and_tokenizer()
+    model, tokenizer = load_model_and_tokenizer(DEVICE)
     
     ppl = None
     em, f1 = None, None

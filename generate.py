@@ -14,12 +14,8 @@ from src.config import (
     LANGUAGE, use_gqa, num_kv_heads
 )
 from src.model import GPT
+from src.eval_utils import arabic_to_devanagari, devanagari_to_arabic
 
-def arabic_to_devanagari(text):
-    return text.translate(str.maketrans('0123456789', '०१२३४५६७८९'))
-
-def devanagari_to_arabic(text):
-    return text.translate(str.maketrans('०१२३४५६७८९', '0123456789'))
 
 def wrap_text_for_terminal(text, width):
     lines = text.split('\n')
@@ -135,8 +131,15 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, top_p
     print("\n")
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Interactive LLM Text Generation")
+    parser.add_argument("--mode", type=str, default="instruct", choices=["instruct", "qa"], help="Inference mode: 'instruct' or 'qa'")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to the model checkpoint")
+    parser.add_argument("--temperature", type=float, default=0.1, help="Temperature for generation (default: 0.1)")
+    args = parser.parse_args()
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    print(f"Using device: {device} | Mode: {args.mode}")
     
     # 1. Load Tokenizer
     if not os.path.exists(TOKENIZER_VOCAB_PATH):
@@ -164,15 +167,29 @@ def main():
     )
     
     # 3. Load Checkpoint
-    checkpoint_path = "sft_checkpoints_instruct/ckpt_instruct_epoch_2.pt"
-    if not os.path.exists(checkpoint_path):
-        print(f"Could not find exact checkpoint: {checkpoint_path}")
-        available = [f for f in os.listdir("sft_checkpoints_instruct") if f.endswith(".pt")]
-        if not available:
-            print("No checkpoints found in sft_checkpoints_instruct/ folder!")
-            return
-        checkpoint_path = os.path.join("sft_checkpoints_instruct", sorted(available)[-1])
-        print(f"Defaulting to latest available checkpoint: {checkpoint_path}")
+    checkpoint_path = args.checkpoint
+    if checkpoint_path is None:
+        if args.mode == "instruct":
+            default_dir = "sft_checkpoints_instruct"
+            default_ckpt = "ckpt_instruct_epoch_2.pt"
+        else:
+            default_dir = "sft_checkpoints"
+            default_ckpt = "ckpt_sft_epoch_3.pt"
+            
+        checkpoint_path = os.path.join(default_dir, default_ckpt)
+        if not os.path.exists(checkpoint_path):
+            print(f"Could not find exact checkpoint: {checkpoint_path}")
+            if os.path.exists(default_dir):
+                available = [f for f in os.listdir(default_dir) if f.endswith(".pt")]
+                if available:
+                    checkpoint_path = os.path.join(default_dir, sorted(available)[-1])
+                    print(f"Defaulting to latest available checkpoint: {checkpoint_path}")
+                else:
+                    print(f"No checkpoints found in {default_dir}/ folder!")
+                    return
+            else:
+                print(f"Directory {default_dir} does not exist!")
+                return
         
     print(f"Loading weights from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -210,14 +227,17 @@ def main():
                 continue
                 
             prompt = arabic_to_devanagari(prompt)
-            formatted_prompt = f"प्रश्न: {prompt}\nउत्तर: "
+            if args.mode == "instruct":
+                formatted_prompt = f"प्रश्न: {prompt}\nउत्तर: "
+            else:
+                formatted_prompt = prompt
             
             generate(
                 model=model,
                 tokenizer=tokenizer,
                 prompt=formatted_prompt,
                 max_new_tokens=max_new_tokens,
-                temperature=0.1,  # Low temperature is required for Extractive QA
+                temperature=args.temperature,
                 top_k=top_k,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,

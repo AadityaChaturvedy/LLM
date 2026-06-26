@@ -10,59 +10,10 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from tqdm import tqdm
 
-from src.custom_tokenizer import CustomTokenizer
-from src.config import (
-    vocab_size, embedding_dim, context_length,
-    num_layers, num_heads, d_model, hidden_dim_ffn, LANGUAGE,
-    CHECKPOINT_PATH
-)
-from src.model import GPT
+from src.config import context_length, CHECKPOINT_PATH
+from src.eval_utils import load_model_and_tokenizer, arabic_to_devanagari
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-def load_model_and_tokenizer():
-    print(f"Using device: {DEVICE}")
-    if LANGUAGE in ["hindi", "hinglish"]:
-        tokenizer = CustomTokenizer()
-        tokenizer.load()
-    else:
-        raise ValueError("This benchmark suite is designed for Hindi/Hinglish custom tokenizer.")
-
-    model = GPT(
-        vocab_size=vocab_size,
-        embedding_dim=embedding_dim,
-        context_length=context_length,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        d_model=d_model,
-        hidden_dim_ffn=hidden_dim_ffn
-    )
-
-    if not os.path.exists(CHECKPOINT_PATH):
-        print(f"Checkpoint {CHECKPOINT_PATH} not found.")
-        return None, None
-
-    print(f"Loading weights from {CHECKPOINT_PATH}...")
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=True)
-    
-    state_dict = checkpoint["model"]
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith("_orig_mod."):
-            new_state_dict[k[len("_orig_mod.") :]] = v
-        else:
-            new_state_dict[k] = v
-            
-    model.load_state_dict(new_state_dict)
-    model.to(DEVICE)
-    model.eval()
-    return model, tokenizer
-
-def arabic_to_devanagari(text):
-    if not isinstance(text, str):
-        text = str(text)
-    mapping = str.maketrans('0123456789', '०१२३४५६७८९')
-    return text.translate(mapping)
 
 @torch.no_grad()
 def evaluate_csqa(model, tokenizer, limit=None):
@@ -176,9 +127,10 @@ def evaluate_csqa(model, tokenizer, limit=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None, help="Number of questions to evaluate (default: all)")
+    parser.add_argument("--checkpoint", type=str, default=CHECKPOINT_PATH, help="Path to the model checkpoint")
     args = parser.parse_args()
     
     print("Initializing CSQA Evaluator...")
-    model, tokenizer = load_model_and_tokenizer()
+    model, tokenizer = load_model_and_tokenizer(DEVICE, args.checkpoint)
     if model:
         evaluate_csqa(model, tokenizer, limit=args.limit)

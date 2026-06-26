@@ -6,6 +6,8 @@ import multiprocessing as mp
 import random
 import time
 import math
+import datetime
+import numpy as np
 
 import torch
 from torch import nn, optim
@@ -21,7 +23,7 @@ from src.config import (
     TRAIN_TOKENIZER, TRAIN_LLM,
     eval_every, eval_steps, save_every, max_grad_norm,
     train_loop, patience, min_delta,
-    vocab_size, embedding_dim, LLM_ROWS, TOKENIZER_ROWS,
+    vocab_size, embedding_dim, TOKENIZER_ROWS,
     context_length, batch_size_encoder, 
     num_heads, d_model,
     hidden_dim_ffn,
@@ -48,7 +50,6 @@ def main():
         device = f"cuda:{ddp_local_rank}"
         torch.cuda.set_device(device)
         
-        import datetime
         backend = os.environ.get("DDP_BACKEND", "nccl")
         dist.init_process_group(
             backend=backend,
@@ -64,7 +65,6 @@ def main():
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Initialize single-process group to support Muon or other distributed utilities
-        import datetime
         backend = "nccl" if "cuda" in str(device) else "gloo"
         dist.init_process_group(
             backend=backend,
@@ -118,7 +118,6 @@ def main():
             dist.all_reduce(stats_tensor, op=dist.ReduceOp.AVG)
         return stats_tensor
 
-    import numpy as np
     seed = 1337
     random.seed(seed + ddp_rank)
     np.random.seed(seed + ddp_rank)
@@ -283,7 +282,8 @@ def main():
     # Wrap model with DDP
     if ddp:
         from torch.nn.parallel import DistributedDataParallel as DDP
-        model = DDP(model, device_ids=[ddp_local_rank], gradient_as_bucket_view=True)
+        # Pass find_unused_parameters=True if MoE is enabled, as some experts may not be routed to in a given step.
+        model = DDP(model, device_ids=[ddp_local_rank], gradient_as_bucket_view=True, find_unused_parameters=MoE)
 
     # Compile model for faster training
     if "cuda" in str(device):

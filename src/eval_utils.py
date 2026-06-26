@@ -62,3 +62,9 @@ def arabic_to_devanagari(text):
         text = str(text)
     mapping = str.maketrans('0123456789', '०१२३४५६७८९')
     return text.translate(mapping)
+
+def devanagari_to_arabic(text):
+    if not isinstance(text, str):
+        text = str(text)
+    mapping = str.maketrans('०१२३४५६७८९', '0123456789')
+    return text.translate(mapping)

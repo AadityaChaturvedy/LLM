@@ -1,5 +1,9 @@
 import os
 import torch
+import sys
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
 try:
     from peft import PeftModel
 except ImportError:
@@ -8,11 +12,11 @@ except ImportError:
 
 from src.model import GPT
 from src.config import (
-    context_length
+    context_length, CHECKPOINT_PATH
 )
 
 # Paths
-BASE_CHECKPOINT = "checkpoints/ckpt_step_120000.pt"
+BASE_CHECKPOINT = CHECKPOINT_PATH
 LORA_ADAPTER_DIR = "sft_checkpoints_lora/lora_epoch_4"  # Default to best/last epoch
 FUSED_CHECKPOINT = "sft_checkpoints_lora/ckpt_lora_fused.pt"
 
@@ -28,7 +32,17 @@ def main():
         
     ckpt_vocab_size, ckpt_embedding_dim = new_state_dict["embedding.token_embedding.weight"].shape
     ckpt_d_model = new_state_dict["blocks.0.mha.wq.weight"].shape[1]
-    ckpt_hidden_ffn = new_state_dict["blocks.0.ffn.w_down.weight"].shape[1]
+    
+    # Infer hidden_dim_ffn dynamically, supporting both standard FFN and MoE FFN
+    if "blocks.0.ffn.w_down.weight" in new_state_dict:
+        ckpt_hidden_ffn = new_state_dict["blocks.0.ffn.w_down.weight"].shape[1]
+    else:
+        ffn_w_down_keys = [k for k in new_state_dict.keys() if k.startswith("blocks.0.ffn.") and k.endswith(".w_down.weight")]
+        if ffn_w_down_keys:
+            ckpt_hidden_ffn = new_state_dict[ffn_w_down_keys[0]].shape[1]
+        else:
+            raise KeyError("Could not find any FFN weight (like w_down.weight) in blocks.0 to determine hidden_dim_ffn.")
+            
     ckpt_num_layers = sum(1 for k in new_state_dict.keys() if k.endswith(".mha.wq.weight"))
     ckpt_num_heads = 16 
 
@@ -39,7 +53,8 @@ def main():
         wk_out_features = new_state_dict["blocks.0.mha.wk.weight"].shape[0]
         d_k = ckpt_d_model // ckpt_num_heads
         num_kv_heads = wk_out_features // d_k
-        use_gqa = num_kv_heads < ckpt_num_heads
+        # Force GQA if wk has fewer KV heads or if q_scale is present in the checkpoint
+        use_gqa = (num_kv_heads < ckpt_num_heads) or ("blocks.0.mha.q_scale" in new_state_dict)
 
     # Reconstruct base model
     model = GPT(
