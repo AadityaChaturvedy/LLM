@@ -30,7 +30,8 @@ def main():
         k_clean = k.replace("_orig_mod.", "").replace("module.", "")
         new_state_dict[k_clean] = v
         
-    ckpt_vocab_size, ckpt_embedding_dim = new_state_dict["embedding.token_embedding.weight"].shape
+    emb_key = "embedding.token_embedding.weight" if "embedding.token_embedding.weight" in new_state_dict else "embedding.weight"
+    ckpt_vocab_size, ckpt_embedding_dim = new_state_dict[emb_key].shape
     ckpt_d_model = new_state_dict["blocks.0.mha.wq.weight"].shape[1]
     
     # Infer hidden_dim_ffn dynamically, supporting both standard FFN and MoE FFN
